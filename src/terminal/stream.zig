@@ -2438,6 +2438,86 @@ test "simd: complete incomplete utf-8" {
     try testing.expectEqual(@as(u21, 0x800), s.handler.c.?);
 }
 
+const Osc777NotificationProbe = struct {
+    print_cps: [8]u21 = undefined,
+    print_count: usize = 0,
+    notification_titles: [4][]const u8 = undefined,
+    notification_bodies: [4][]const u8 = undefined,
+    notification_count: usize = 0,
+
+    pub fn vt(
+        self: *@This(),
+        comptime action: Action.Tag,
+        value: Action.Value(action),
+    ) !void {
+        switch (action) {
+            .print => {
+                assert(self.print_count < self.print_cps.len);
+                self.print_cps[self.print_count] = value.cp;
+                self.print_count += 1;
+            },
+            .show_desktop_notification => {
+                assert(self.notification_count < self.notification_titles.len);
+                self.notification_titles[self.notification_count] = value.title;
+                self.notification_bodies[self.notification_count] = value.body;
+                self.notification_count += 1;
+            },
+            else => {},
+        }
+    }
+};
+
+fn expectOsc777Handled(
+    chunks: []const []const u8,
+    expected_prints: []const u21,
+) !void {
+    var s: Stream(Osc777NotificationProbe) = .init(.{});
+    for (chunks) |chunk| try s.nextSlice(chunk);
+
+    try testing.expectEqual(expected_prints.len, s.handler.print_count);
+    try testing.expectEqualSlices(u21, expected_prints, s.handler.print_cps[0..s.handler.print_count]);
+    try testing.expectEqual(@as(usize, 1), s.handler.notification_count);
+    try testing.expectEqualStrings("Title", s.handler.notification_titles[0]);
+    try testing.expectEqualStrings("Body", s.handler.notification_bodies[0]);
+}
+
+test "stream: OSC 777 is consumed without printing across chunk splits" {
+    const seq = "\x1b]777;notify;Title;Body\x07";
+
+    try expectOsc777Handled(&.{seq}, &.{});
+
+    for (1..seq.len) |split| {
+        try expectOsc777Handled(&.{
+            seq[0..split],
+            seq[split..],
+        }, &.{});
+    }
+
+    for (1..seq.len) |first_split| {
+        for (first_split + 1..seq.len) |second_split| {
+            try expectOsc777Handled(&.{
+                seq[0..first_split],
+                seq[first_split..second_split],
+                seq[second_split..],
+            }, &.{});
+        }
+    }
+}
+
+test "stream: OSC 777 stays handled after UTF-8 boundary cases" {
+    const seq = "\x1b]777;notify;Title;Body\x07";
+
+    try expectOsc777Handled(&.{
+        "x\xe2",
+        "\x82\xac" ++ seq,
+    }, &.{ 'x', 0x20AC });
+
+    try expectOsc777Handled(&.{
+        "x\xe2",
+        seq,
+    }, &.{ 'x', 0xFFFD });
+}
+
 test "stream: cursor right (CUF)" {
     const H = struct {
         amount: u16 = 0,
