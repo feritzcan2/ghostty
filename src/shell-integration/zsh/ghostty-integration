@@ -149,11 +149,15 @@ _ghostty_deferred_init() {
                 [[ $PS1 == *$mark1* ]] || PS1=${mark1}${PS1}
                 [[ $PS1 == *$markB* ]] || PS1=${PS1}${markB}
                 # Handle multiline prompts by marking newline-separated
-                # continuation lines with k=s (mark2). Prompts like Pure use
-                # \n%{\r%} to move the cursor back to column 0, so the
-                # continuation mark has to sit after that non-printing CR.
+                # continuation lines with k=s (mark2).
+                #
+                # Pure-style prompts use \n%{\r%} to move back to column 0
+                # before the visible prompt line. Ghostty already promotes the
+                # next row to a prompt continuation when prompt mode crosses a
+                # newline, so inserting another explicit continuation mark after
+                # that hidden CR creates a second prompt boundary during redraws.
                 if [[ $PS1 == *$'\n%{\r%}'* ]]; then
-                    PS1=${PS1//$'\n%{\r%}'/$'\n%{\r%}'${mark2}}
+                    :
                 elif [[ $PS1 == ${mark1}$'\n'* ]]; then
                     builtin local rest=${PS1#${mark1}$'\n'}
                     if [[ $rest == *$'\n'* ]]; then
