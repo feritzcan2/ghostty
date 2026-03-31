@@ -93,7 +93,7 @@ pub fn addAppleSDK(b: *std.Build, m: *std.Build.Module) !void {
         .watchos => error.XcodeWatchOSSDKNotFound,
         else => error.XcodeAppleSDKNotFound,
     };
-    m.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ path, "/System/Library/Frameworks" }) });
-    m.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ path, "/usr/include" }) });
-    m.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ path, "/usr/lib" }) });
+    m.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ path, "System/Library/Frameworks" }) });
+    m.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ path, "usr/include" }) });
+    m.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ path, "usr/lib" }) });
 }
