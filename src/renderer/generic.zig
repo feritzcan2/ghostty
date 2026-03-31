@@ -1404,19 +1404,19 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     self.scrollbar_dirty = true;
                 }
 
-                // Update our background color
-                log.warn("bg_color: terminal=({},{},{}) config=({},{},{})", .{
-                    self.terminal_state.colors.background.r,
-                    self.terminal_state.colors.background.g,
-                    self.terminal_state.colors.background.b,
-                    self.config.background.r,
-                    self.config.background.g,
-                    self.config.background.b,
-                });
+                // Update our background color.
+                // Use terminal state if it has a non-default color, otherwise
+                // fall back to the config background (for embedded apps where
+                // terminal_state may not have been updated yet).
+                const ts_bg = self.terminal_state.colors.background;
+                const bg = if (ts_bg.r != 0 or ts_bg.g != 0 or ts_bg.b != 0)
+                    ts_bg
+                else
+                    self.config.background;
                 self.uniforms.bg_color = .{
-                    self.terminal_state.colors.background.r,
-                    self.terminal_state.colors.background.g,
-                    self.terminal_state.colors.background.b,
+                    bg.r,
+                    bg.g,
+                    bg.b,
                     @intFromFloat(@round(self.config.background_opacity * 255.0)),
                 };
 
