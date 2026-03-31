@@ -1404,21 +1404,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     self.scrollbar_dirty = true;
                 }
 
-                // Update our background color.
-                // Use terminal state if it has a non-default color, otherwise
-                // fall back to the config background (for embedded apps where
-                // terminal_state may not have been updated yet).
-                const ts_bg = self.terminal_state.colors.background;
-                const bg = if (ts_bg.r != 0 or ts_bg.g != 0 or ts_bg.b != 0)
-                    ts_bg
-                else
-                    self.config.background;
-                self.uniforms.bg_color = .{
-                    bg.r,
-                    bg.g,
-                    bg.b,
-                    @intFromFloat(@round(self.config.background_opacity * 255.0)),
-                };
+                // EXPERIMENT: hardcode red background to test if the shader works at all
+                self.uniforms.bg_color = .{ 255, 0, 0, 255 };
 
                 // If we're on macOS and have glass styles, we remove
                 // the background opacity because the glass effect handles
