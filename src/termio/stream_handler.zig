@@ -391,6 +391,9 @@ pub const StreamHandler = struct {
                         viewer.* = try .init(self.alloc);
                         errdefer viewer.deinit();
                         self.tmux_viewer = viewer;
+
+                        // Notify the GUI that tmux control mode has been entered
+                        self.surfaceMessageWriter(.{ .tmux_state = .entered });
                         break :tmux;
                     },
 
@@ -401,6 +404,9 @@ pub const StreamHandler = struct {
                             self.alloc.destroy(viewer);
                             self.tmux_viewer = null;
                         }
+
+                        // Notify the GUI that tmux control mode has exited
+                        self.surfaceMessageWriter(.{ .tmux_state = .exited });
 
                         // And always break since we assert below
                         // that we're not handling an exit command.
@@ -428,10 +434,10 @@ pub const StreamHandler = struct {
                     log.info("tmux viewer action={f}", .{action});
                     switch (action) {
                         .exit => {
-                            // We ignore this because we will fully exit when
-                            // our DCS connection ends. We may want to handle
-                            // this in the future to notify our GUI we're
-                            // disconnected though.
+                            // The viewer is signaling an exit. The DCS handler
+                            // will also fire .exit which frees the viewer.
+                            // Notify the GUI so it can transition out of tmux mode.
+                            self.surfaceMessageWriter(.{ .tmux_state = .exited });
                         },
 
                         .command => |command| {
@@ -444,7 +450,10 @@ pub const StreamHandler = struct {
                         },
 
                         .windows => {
-                            // TODO
+                            // Notify the GUI that the tmux window/pane
+                            // layout has changed. The GUI should query the
+                            // viewer for the current state.
+                            self.surfaceMessageWriter(.{ .tmux_state = .windows_changed });
                         },
                     }
                 }

@@ -2039,6 +2039,69 @@ pub const CAPI = struct {
         };
     }
 
+    /// Returns true if the surface is currently in tmux control mode.
+    export fn ghostty_surface_tmux_active(ptr: *Surface) bool {
+        if (comptime !terminal.options.tmux_control_mode) return false;
+        return ptr.core_surface.io.terminal_stream.handler.tmux_viewer != null;
+    }
+
+    /// Returns the number of tmux windows in the current session.
+    export fn ghostty_surface_tmux_window_count(ptr: *Surface) usize {
+        if (comptime !terminal.options.tmux_control_mode) return 0;
+        const viewer = ptr.core_surface.io.terminal_stream.handler.tmux_viewer orelse return 0;
+        return viewer.windows.items.len;
+    }
+
+    /// Fills the provided buffer with tmux window info. Returns the count written.
+    export fn ghostty_surface_tmux_window_info(
+        ptr: *Surface,
+        out: [*]extern struct { id: usize, width: usize, height: usize },
+        max_count: usize,
+    ) usize {
+        if (comptime !terminal.options.tmux_control_mode) return 0;
+        const viewer = ptr.core_surface.io.terminal_stream.handler.tmux_viewer orelse return 0;
+        const count = @min(viewer.windows.items.len, max_count);
+        for (viewer.windows.items[0..count], 0..) |w, i| {
+            out[i] = .{ .id = w.id, .width = w.width, .height = w.height };
+        }
+        return count;
+    }
+
+    /// Returns the number of panes across all tmux windows.
+    export fn ghostty_surface_tmux_pane_count(ptr: *Surface) usize {
+        if (comptime !terminal.options.tmux_control_mode) return 0;
+        const viewer = ptr.core_surface.io.terminal_stream.handler.tmux_viewer orelse return 0;
+        return viewer.panes.count();
+    }
+
+    /// Fills the provided buffer with tmux pane IDs. Returns the count written.
+    export fn ghostty_surface_tmux_pane_ids(
+        ptr: *Surface,
+        out: [*]usize,
+        max_count: usize,
+    ) usize {
+        if (comptime !terminal.options.tmux_control_mode) return 0;
+        const viewer = ptr.core_surface.io.terminal_stream.handler.tmux_viewer orelse return 0;
+        const keys = viewer.panes.keys();
+        const count = @min(keys.len, max_count);
+        @memcpy(out[0..count], keys[0..count]);
+        return count;
+    }
+
+    /// Sets the active pane for rendering. Swaps the renderer's terminal
+    /// pointer to the specified tmux pane's terminal.
+    export fn ghostty_surface_tmux_set_active_pane(ptr: *Surface, pane_id: usize) bool {
+        if (comptime !terminal.options.tmux_control_mode) return false;
+        const viewer = ptr.core_surface.io.terminal_stream.handler.tmux_viewer orelse return false;
+        const pane = viewer.panes.getPtr(pane_id) orelse return false;
+
+        // Swap the renderer's terminal pointer under the mutex
+        ptr.core_surface.renderer_state.mutex.lock();
+        defer ptr.core_surface.renderer_state.mutex.unlock();
+        ptr.core_surface.renderer_state.terminal = &pane.terminal;
+        return true;
+    }
+
     /// Complete a clipboard read request started via the read callback.
     /// This can only be called once for a given request. Once it is called
     /// with a request the request pointer will be invalidated.

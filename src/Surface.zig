@@ -1181,6 +1181,14 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
                 .{ .selected = v },
             );
         },
+
+        .tmux_state => |state| {
+            _ = try self.rt_app.performAction(
+                .{ .surface = self },
+                .tmux_state,
+                state,
+            );
+        },
     }
 }
 

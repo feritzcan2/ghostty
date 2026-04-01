@@ -340,6 +340,11 @@ pub const Action = union(Key) {
     /// otherwise the terminal-set title.
     copy_title_to_clipboard,
 
+    /// The tmux control mode state has changed. This is sent when
+    /// the terminal enters or exits tmux control mode (DCS 1000p),
+    /// or when the tmux window/pane layout changes.
+    tmux_state: TmuxState,
+
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
         quit,
@@ -406,6 +411,7 @@ pub const Action = union(Key) {
         search_selected,
         readonly,
         copy_title_to_clipboard,
+        tmux_state,
 
         test "ghostty.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");
@@ -995,6 +1001,22 @@ pub const SearchSelected = struct {
         return .{
             .selected = if (self.selected) |s| @intCast(s) else -1,
         };
+    }
+};
+
+pub const TmuxState = enum(c_int) {
+    /// Tmux control mode has been entered (DCS 1000p received).
+    entered,
+
+    /// Tmux control mode has exited.
+    exited,
+
+    /// The tmux window/pane layout has changed. Query the surface
+    /// for the current tmux state using the tmux C API functions.
+    windows_changed,
+
+    test "ghostty.h TmuxState" {
+        try lib.checkGhosttyHEnum(TmuxState, "GHOSTTY_TMUX_STATE_");
     }
 };
 

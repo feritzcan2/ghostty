@@ -108,6 +108,9 @@ pub const Message = union(enum) {
     /// Selected search index change
     search_selected: ?usize,
 
+    /// Tmux control mode state change.
+    tmux_state: apprt.action.TmuxState,
+
     pub const ReportTitleStyle = enum {
         csi_21_t,
 
