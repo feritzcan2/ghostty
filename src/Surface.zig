@@ -889,7 +889,69 @@ fn queueIo(
         }
     }
 
+    // In tmux control mode, user keystrokes must be wrapped as
+    // send-keys -H commands. Viewer commands go through the termio
+    // mailbox directly (via stream_handler.messageWriter) and bypass
+    // this function, so only user input reaches here.
+    if (comptime terminal.options.tmux_control_mode) {
+        switch (msg) {
+            .write_small => |v| {
+                if (self.tmuxWrapSendKeys(v.data[0..v.len])) |wrapped| {
+                    self.io.queueMessage(wrapped, mutex);
+                    return;
+                }
+            },
+            .write_stable => |v| {
+                if (self.tmuxWrapSendKeys(v)) |wrapped| {
+                    self.io.queueMessage(wrapped, mutex);
+                    return;
+                }
+            },
+            .write_alloc => |v| {
+                if (self.tmuxWrapSendKeys(v.data)) |wrapped| {
+                    v.alloc.free(v.data);
+                    self.io.queueMessage(wrapped, mutex);
+                    return;
+                }
+            },
+            else => {},
+        }
+    }
+
     self.io.queueMessage(msg, mutex);
+}
+
+/// If tmux control mode is active, wrap data as a send-keys -H command.
+/// Returns null if tmux is not active.
+fn tmuxWrapSendKeys(self: *Surface, data: []const u8) ?termio.Message {
+    const viewer = self.io.terminal_stream.handler.tmux_viewer orelse return null;
+    const keys = viewer.panes.keys();
+    if (keys.len == 0) return null;
+    const pane_id = keys[0];
+
+    // Format: send-keys -H -t %<paneID> XX XX XX...\n
+    var cmd_buf: [4096]u8 = undefined;
+    const prefix = std.fmt.bufPrint(
+        cmd_buf[0..],
+        "send-keys -H -t %{d}",
+        .{pane_id},
+    ) catch return null;
+    var cmd_len = prefix.len;
+
+    for (data) |byte| {
+        const hex = std.fmt.bufPrint(
+            cmd_buf[cmd_len..],
+            " {X:0>2}",
+            .{byte},
+        ) catch break;
+        cmd_len += hex.len;
+    }
+
+    if (cmd_len + 1 >= cmd_buf.len) return null;
+    cmd_buf[cmd_len] = '\n';
+    cmd_len += 1;
+
+    return termio.Message.writeReq(self.alloc, cmd_buf[0..cmd_len]) catch return null;
 }
 
 /// Forces the surface to render. This is useful for when the surface
