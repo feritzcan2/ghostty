@@ -1114,8 +1114,9 @@ GHOSTTY_API void ghostty_surface_set_focus(ghostty_surface_t, bool);
 GHOSTTY_API void ghostty_surface_set_occlusion(ghostty_surface_t, bool);
 GHOSTTY_API void ghostty_surface_set_size(ghostty_surface_t, uint32_t, uint32_t);
 GHOSTTY_API ghostty_surface_size_s ghostty_surface_size(ghostty_surface_t);
+GHOSTTY_API bool ghostty_surface_is_alternate_screen(ghostty_surface_t);
 GHOSTTY_API void ghostty_surface_set_color_scheme(ghostty_surface_t,
-                                                     ghostty_color_scheme_e);
+                                        ghostty_color_scheme_e);
 GHOSTTY_API ghostty_input_mods_e ghostty_surface_key_translation_mods(ghostty_surface_t,
                                                                          ghostty_input_mods_e);
 GHOSTTY_API bool ghostty_surface_key(ghostty_surface_t, ghostty_input_key_s);

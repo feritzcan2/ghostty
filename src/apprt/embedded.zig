@@ -1734,6 +1734,10 @@ pub const CAPI = struct {
         };
     }
 
+    export fn ghostty_surface_is_alternate_screen(surface: *Surface) bool {
+        return surface.core_surface.io.terminal.screens.active_key == .alternate;
+    }
+
     /// Update the color scheme of the surface.
     export fn ghostty_surface_set_color_scheme(surface: *Surface, scheme_raw: c_int) void {
         const scheme = std.meta.intToEnum(apprt.ColorScheme, scheme_raw) catch {
