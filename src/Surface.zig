@@ -625,19 +625,6 @@ pub fn init(
     else
         null;
 
-    const use_manual_io = if (comptime @hasDecl(apprt.runtime.Surface, "ioMode"))
-        rt_surface.ioMode() == .manual
-    else
-        false;
-    const manual_write_cb = if (comptime @hasDecl(apprt.runtime.Surface, "ioWriteCallback"))
-        rt_surface.ioWriteCallback()
-    else
-        null;
-    const manual_write_userdata = if (comptime @hasDecl(apprt.runtime.Surface, "ioWriteUserdata"))
-        rt_surface.ioWriteUserdata()
-    else
-        null;
-
     // Start our IO implementation
     // This separate block ({}) is important because our errdefers must
     // be scoped here to be valid.

@@ -116,16 +116,6 @@ pub const Backend = union(Kind) {
             ),
         }
     }
-
-    /// Get information about the process(es) attached to the backend. Returns
-    /// `null` if there was an error getting the information or the information
-    /// is not available on a particular platform.
-    pub fn getProcessInfo(self: *Backend, comptime info: ProcessInfo) ?ProcessInfo.Type(info) {
-        return switch (self.*) {
-            .exec => |*exec| exec.getProcessInfo(info),
-            .manual => null,
-        };
-    }
 };
 
 /// Termio thread data. See termio.ThreadData for docs.
