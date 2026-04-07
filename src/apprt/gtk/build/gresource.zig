@@ -7,7 +7,9 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const build_info = @import("info.zig");
+/// Prefix/appid for the gresource file.
+pub const prefix = "/com/mitchellh/ghostty";
+pub const app_id = "com.mitchellh.ghostty";
 
 /// The path to the Blueprint files. The folder structure is expected to be
 /// `{version}/{name}.blp` where `version` is the major and minor
@@ -110,7 +112,7 @@ pub fn blueprint(comptime bp: Blueprint) [:0]const u8 {
                 std.mem.eql(u8, candidate.name, bp.name))
             {
                 return std.fmt.comptimePrint("{s}/ui/{d}.{d}/{s}.ui", .{
-                    build_info.resource_path,
+                    prefix,
                     candidate.major,
                     candidate.minor,
                     candidate.name,
@@ -171,7 +173,7 @@ fn genIcons(writer: *std.Io.Writer) !void {
     try writer.print(
         \\  <gresource prefix="{s}/icons">
         \\
-    , .{build_info.resource_path});
+    , .{prefix});
 
     const cwd = std.fs.cwd();
     inline for (icon_sizes) |size| {
@@ -184,7 +186,7 @@ fn genIcons(writer: *std.Io.Writer) !void {
                 \\    <file alias="{s}/apps/{s}.png">{s}</file>
                 \\
             ,
-                .{ alias, build_info.base_application_id, source },
+                .{ alias, app_id, source },
             );
         }
 
@@ -197,7 +199,7 @@ fn genIcons(writer: *std.Io.Writer) !void {
                 \\    <file alias="{s}/apps/{s}.png">{s}</file>
                 \\
             ,
-                .{ alias, build_info.base_application_id, source },
+                .{ alias, app_id, source },
             );
         }
     }
@@ -213,7 +215,7 @@ fn genRoot(writer: *std.Io.Writer) !void {
     try writer.print(
         \\  <gresource prefix="{s}">
         \\
-    , .{build_info.resource_path});
+    , .{prefix});
 
     const cwd = std.fs.cwd();
     inline for (css) |name| {
@@ -247,7 +249,7 @@ fn genUi(
     try writer.print(
         \\  <gresource prefix="{s}/ui">
         \\
-    , .{build_info.resource_path});
+    , .{prefix});
 
     for (files.items) |ui_file| {
         for (blueprints) |bp| {

@@ -625,8 +625,6 @@ class QuickTerminalController: BaseTerminalController {
             window.isOpaque = true
             window.backgroundColor = .windowBackgroundColor
         }
-
-        terminalViewContainer?.ghosttyConfigDidChange(ghostty.config, preferredBackgroundColor: nil)
     }
 
     private func showNoNewTabAlert() {

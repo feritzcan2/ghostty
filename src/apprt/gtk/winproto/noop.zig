@@ -19,8 +19,9 @@ pub const App = struct {
         return null;
     }
 
-    pub fn deinit(self: *App) void {
+    pub fn deinit(self: *App, alloc: Allocator) void {
         _ = self;
+        _ = alloc;
     }
 
     pub fn eventMods(
@@ -46,8 +47,9 @@ pub const Window = struct {
         return .{};
     }
 
-    pub fn deinit(self: *Window) void {
+    pub fn deinit(self: Window, alloc: Allocator) void {
         _ = self;
+        _ = alloc;
     }
 
     pub fn updateConfigEvent(

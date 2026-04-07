@@ -33,9 +33,7 @@ pub fn parse(line: []const u8) ?Entry {
     };
 }
 
-pub const FormatError = std.Io.Writer.Error;
-
-pub fn format(self: Entry, writer: *std.Io.Writer) FormatError!void {
+pub fn format(self: Entry, writer: *std.Io.Writer) !void {
     try writer.print(
         "{s}|{d}|{s}\n",
         .{ self.hostname, self.timestamp, self.terminfo_version },

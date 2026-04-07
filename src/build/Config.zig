@@ -51,7 +51,6 @@ emit_bench: bool = false,
 emit_docs: bool = false,
 emit_exe: bool = false,
 emit_helpgen: bool = false,
-emit_lib_vt: bool = false,
 emit_macos_app: bool = false,
 emit_terminfo: bool = false,
 emit_termcap: bool = false,
@@ -60,10 +59,6 @@ emit_themes: bool = false,
 emit_xcframework: bool = false,
 emit_webdata: bool = false,
 emit_unicode_table_gen: bool = false,
-
-/// True when Ghostty is being built as a dependency of another project
-/// rather than as the root project.
-is_dep: bool = false,
 
 /// Environmental properties
 env: std.process.EnvMap,
@@ -83,19 +78,6 @@ pub fn init(b: *std.Build, appVersion: []const u8) !Config {
             result = genericMacOSTarget(b, result.query.cpu_arch);
         }
 
-        // On Windows, default to the MSVC ABI so that produced COFF
-        // objects (including compiler_rt) are compatible with the MSVC
-        // linker. Zig defaults to the GNU ABI which produces objects
-        // with invalid COMDAT sections that MSVC rejects (LNK1143).
-        // Only override when no explicit ABI was requested.
-        if (result.result.os.tag == .windows and
-            result.query.abi == null)
-        {
-            var query = result.query;
-            query.abi = .msvc;
-            result = b.resolveTargetQuery(query);
-        }
-
         // If we have no minimum OS version, we set the default based on
         // our tag. Not all tags have a minimum so this may be null.
         if (result.query.os_version_min == null) {
@@ -104,10 +86,6 @@ pub fn init(b: *std.Build, appVersion: []const u8) !Config {
 
         break :target result;
     };
-
-    // Detect if Ghostty is a dependency of another project.
-    // dep_prefix is non-empty when this build is running as a dependency.
-    const is_dep = b.dep_prefix.len > 0;
 
     // This is set to true when we're building a system package. For now
     // this is trivially detected using the "system_package_mode" bool
@@ -131,7 +109,6 @@ pub fn init(b: *std.Build, appVersion: []const u8) !Config {
         .optimize = optimize,
         .target = target,
         .wasm_target = wasm_target,
-        .is_dep = is_dep,
         .env = env,
     };
 
@@ -243,7 +220,9 @@ pub fn init(b: *std.Build, appVersion: []const u8) !Config {
         const app_version = try std.SemanticVersion.parse(appVersion);
 
         // Is ghostty a dependency? If so, skip git detection.
-        if (is_dep) break :version .{
+        // @src().file won't resolve from b.build_root unless ghostty
+        // is the project being built.
+        b.build_root.handle.access(@src().file, .{}) catch break :version .{
             .major = app_version.major,
             .minor = app_version.minor,
             .patch = app_version.patch,
@@ -335,17 +314,11 @@ pub fn init(b: *std.Build, appVersion: []const u8) !Config {
     //---------------------------------------------------------------
     // Artifacts to Emit
 
-    config.emit_lib_vt = b.option(
-        bool,
-        "emit-lib-vt",
-        "Set defaults for a libghostty-vt-only build (disables xcframework, macOS app, and docs).",
-    ) orelse false;
-
     config.emit_exe = b.option(
         bool,
         "emit-exe",
         "Build and install main executables with 'build'",
-    ) orelse !config.emit_lib_vt;
+    ) orelse true;
 
     config.emit_test_exe = b.option(
         bool,
@@ -379,8 +352,7 @@ pub fn init(b: *std.Build, appVersion: []const u8) !Config {
         // If we are emitting any other artifacts then we default to false.
         if (config.emit_bench or
             config.emit_test_exe or
-            config.emit_helpgen or
-            config.emit_lib_vt) break :emit_docs false;
+            config.emit_helpgen) break :emit_docs false;
 
         // We always emit docs in system package mode.
         if (system_package) break :emit_docs true;
@@ -429,8 +401,7 @@ pub fn init(b: *std.Build, appVersion: []const u8) !Config {
         bool,
         "emit-xcframework",
         "Build and install the xcframework for the macOS library.",
-    ) orelse !config.emit_lib_vt and
-        builtin.target.os.tag.isDarwin() and
+    ) orelse builtin.target.os.tag.isDarwin() and
         target.result.os.tag == .macos and
         config.app_runtime == .none and
         (!config.emit_bench and
@@ -441,7 +412,7 @@ pub fn init(b: *std.Build, appVersion: []const u8) !Config {
         bool,
         "emit-macos-app",
         "Build and install the macOS app bundle.",
-    ) orelse !config.emit_lib_vt and config.emit_xcframework;
+    ) orelse config.emit_xcframework;
 
     //---------------------------------------------------------------
     // System Packages
@@ -453,6 +424,19 @@ pub fn init(b: *std.Build, appVersion: []const u8) !Config {
     // show up properly in `--help`.
 
     {
+        // These should default to `true` except on macOS because linking them
+        // to Ghostty statically when GTK is dynamically linked to them can
+        // cause crashes.
+        for (&[_][]const u8{
+            "fontconfig",
+        }) |dep| {
+            _ = b.systemIntegrationOption(
+                dep,
+                .{
+                    .default = if (target.result.os.tag.isDarwin()) false else true,
+                },
+            );
+        }
         // These dependencies we want to default false if we're on macOS.
         // On macOS we don't want to use system libraries because we
         // generally want a fat binary. This can be overridden with the
@@ -460,7 +444,6 @@ pub fn init(b: *std.Build, appVersion: []const u8) !Config {
         for (&[_][]const u8{
             "freetype",
             "harfbuzz",
-            "fontconfig",
             "libpng",
             "zlib",
             "oniguruma",
@@ -545,7 +528,6 @@ pub fn terminalOptions(self: *const Config) TerminalBuildOptions {
         .simd = self.simd,
         .oniguruma = true,
         .c_abi = false,
-        .version = self.version,
         .slow_runtime_safety = switch (self.optimize) {
             .Debug => true,
             .ReleaseSafe,

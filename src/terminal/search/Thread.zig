@@ -853,7 +853,7 @@ test {
 
     var stream = t.vtStream();
     defer stream.deinit();
-    stream.nextSlice("Hello, world");
+    try stream.nextSlice("Hello, world");
 
     var ud: TestUserData = .{};
     defer ud.deinit();

@@ -266,27 +266,10 @@ pub const Window = extern struct {
         pub var offset: c_int = 0;
     };
 
-    pub fn new(
-        app: *Application,
-        overrides: struct {
-            title: ?[:0]const u8 = null,
-
-            pub const none: @This() = .{};
-        },
-    ) *Self {
-        const win = gobject.ext.newInstance(Self, .{
+    pub fn new(app: *Application) *Self {
+        return gobject.ext.newInstance(Self, .{
             .application = app,
         });
-
-        if (overrides.title) |title| {
-            // If the overrides have a title set, we set that immediately
-            // so that any applications inspecting the window states see an
-            // immediate title set when the window appears, rather than waiting
-            // possibly a few event loop ticks for it to sync from the surface.
-            win.as(gtk.Window).setTitle(title);
-        }
-
-        return win;
     }
 
     fn init(self: *Self, _: *Class) callconv(.c) void {
@@ -295,14 +278,10 @@ pub const Window = extern struct {
         // If our configuration is null then we get the configuration
         // from the application.
         const priv = self.private();
-
-        const config = config: {
-            if (priv.config) |config| break :config config.get();
+        if (priv.config == null) {
             const app = Application.default();
-            const config = app.getConfig();
-            priv.config = config;
-            break :config config.get();
-        };
+            priv.config = app.getConfig();
+        }
 
         // We initialize our windowing protocol to none because we can't
         // actually initialize this until we get realized.
@@ -326,16 +305,17 @@ pub const Window = extern struct {
         self.initActionMap();
 
         // Start states based on config.
-        if (config.maximize) self.as(gtk.Window).maximize();
-        if (config.fullscreen != .false) self.as(gtk.Window).fullscreen();
+        if (priv.config) |config_obj| {
+            const config = config_obj.get();
+            if (config.maximize) self.as(gtk.Window).maximize();
+            if (config.fullscreen != .false) self.as(gtk.Window).fullscreen();
 
-        // If we have an explicit title set, we set that immediately
-        // so that any applications inspecting the window states see
-        // an immediate title set when the window appears, rather than
-        // waiting possibly a few event loop ticks for it to sync from
-        // the surface.
-        if (config.title) |title| {
-            self.as(gtk.Window).setTitle(title);
+            // If we have an explicit title set, we set that immediately
+            // so that any applications inspecting the window states see
+            // an immediate title set when the window appears, rather than
+            // waiting possibly a few event loop ticks for it to sync from
+            // the surface.
+            if (config.title) |v| self.as(gtk.Window).setTitle(v);
         }
 
         // We always sync our appearance at the end because loading our
@@ -388,56 +368,21 @@ pub const Window = extern struct {
     /// at the position dictated by the `window-new-tab-position` config.
     /// The new tab will be selected.
     pub fn newTab(self: *Self, parent_: ?*CoreSurface) void {
-        _ = self.newTabPage(parent_, .tab, .none);
+        _ = self.newTabPage(parent_, .tab);
     }
 
-    pub fn newTabForWindow(
-        self: *Self,
-        parent_: ?*CoreSurface,
-        overrides: struct {
-            command: ?configpkg.Command = null,
-            working_directory: ?[:0]const u8 = null,
-            title: ?[:0]const u8 = null,
-
-            pub const none: @This() = .{};
-        },
-    ) void {
-        _ = self.newTabPage(
-            parent_,
-            .window,
-            .{
-                .command = overrides.command,
-                .working_directory = overrides.working_directory,
-                .title = overrides.title,
-            },
-        );
+    pub fn newTabForWindow(self: *Self, parent_: ?*CoreSurface) void {
+        _ = self.newTabPage(parent_, .window);
     }
 
-    fn newTabPage(
-        self: *Self,
-        parent_: ?*CoreSurface,
-        context: apprt.surface.NewSurfaceContext,
-        overrides: struct {
-            command: ?configpkg.Command = null,
-            working_directory: ?[:0]const u8 = null,
-            title: ?[:0]const u8 = null,
-
-            pub const none: @This() = .{};
-        },
-    ) *adw.TabPage {
-        const priv: *Private = self.private();
+    fn newTabPage(self: *Self, parent_: ?*CoreSurface, context: apprt.surface.NewSurfaceContext) *adw.TabPage {
+        const priv = self.private();
         const tab_view = priv.tab_view;
 
         // Create our new tab object
-        const tab = Tab.new(
-            priv.config,
-            .{
-                .command = overrides.command,
-                .working_directory = overrides.working_directory,
-                .title = overrides.title,
-            },
-        );
-
+        const tab = gobject.ext.newInstance(Tab, .{
+            .config = priv.config,
+        });
         if (parent_) |p| {
             // For a new window's first tab, inherit the parent's initial size hints.
             if (context == .window) {
@@ -1071,6 +1016,21 @@ pub const Window = extern struct {
         self.syncAppearance();
     }
 
+    fn propGdkSurfaceHeight(
+        _: *gdk.Surface,
+        _: *gobject.ParamSpec,
+        self: *Self,
+    ) callconv(.c) void {
+        // X11 needs to fix blurring on resize, but winproto implementations
+        // could do anything.
+        self.private().winproto.resizeEvent() catch |err| {
+            log.warn(
+                "winproto resize event failed error={}",
+                .{err},
+            );
+        };
+    }
+
     fn propIsActive(
         _: *gtk.Window,
         _: *gobject.ParamSpec,
@@ -1096,7 +1056,7 @@ pub const Window = extern struct {
         };
     }
 
-    fn propGdkSurfaceDims(
+    fn propGdkSurfaceWidth(
         _: *gdk.Surface,
         _: *gobject.ParamSpec,
         self: *Self,
@@ -1235,7 +1195,7 @@ pub const Window = extern struct {
     fn finalize(self: *Self) callconv(.c) void {
         const priv = self.private();
         priv.tab_bindings.unref();
-        priv.winproto.deinit();
+        priv.winproto.deinit(Application.default().allocator());
 
         gobject.Object.virtual_methods.finalize.call(
             Class.parent,
@@ -1267,14 +1227,14 @@ pub const Window = extern struct {
             _ = gobject.Object.signals.notify.connect(
                 gdk_surface,
                 *Self,
-                propGdkSurfaceDims,
+                propGdkSurfaceWidth,
                 self,
                 .{ .detail = "width" },
             );
             _ = gobject.Object.signals.notify.connect(
                 gdk_surface,
                 *Self,
-                propGdkSurfaceDims,
+                propGdkSurfaceHeight,
                 self,
                 .{ .detail = "height" },
             );
@@ -1293,7 +1253,7 @@ pub const Window = extern struct {
         _: *adw.TabOverview,
         self: *Self,
     ) callconv(.c) *adw.TabPage {
-        return self.newTabPage(if (self.getActiveSurface()) |v| v.core() else null, .tab, .none);
+        return self.newTabPage(if (self.getActiveSurface()) |v| v.core() else null, .tab);
     }
 
     fn tabOverviewOpen(

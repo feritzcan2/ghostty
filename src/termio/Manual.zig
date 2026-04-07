@@ -94,13 +94,13 @@ pub const ThreadData = struct {
 
 test "manual queueWrite linefeed conversion" {
     const testing = std.testing;
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(testing.allocator);
+    var out = std.ArrayList(u8).init(testing.allocator);
+    defer out.deinit();
 
     const cb = struct {
         fn write(ud: ?*anyopaque, ptr: [*]const u8, len: usize) callconv(.c) void {
             const list: *std.ArrayList(u8) = @ptrCast(@alignCast(ud.?));
-            _ = list.appendSlice(std.testing.allocator, ptr[0..len]) catch {};
+            _ = list.appendSlice(ptr[0..len]) catch {};
         }
     }.write;
 
@@ -114,13 +114,13 @@ test "manual queueWrite linefeed conversion" {
 
 test "manual queueWrite passes raw bytes through when linefeed is disabled" {
     const testing = std.testing;
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(testing.allocator);
+    var out = std.ArrayList(u8).init(testing.allocator);
+    defer out.deinit();
 
     const cb = struct {
         fn write(ud: ?*anyopaque, ptr: [*]const u8, len: usize) callconv(.c) void {
             const list: *std.ArrayList(u8) = @ptrCast(@alignCast(ud.?));
-            _ = list.appendSlice(std.testing.allocator, ptr[0..len]) catch {};
+            _ = list.appendSlice(ptr[0..len]) catch {};
         }
     }.write;
 

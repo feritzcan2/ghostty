@@ -14,24 +14,24 @@ pub fn main() !void {
     defer stream.deinit();
 
     // Basic text with newline
-    stream.nextSlice("Hello, World!\r\n");
+    try stream.nextSlice("Hello, World!\r\n");
 
     // ANSI color codes: ESC[1;32m = bold green, ESC[0m = reset
-    stream.nextSlice("\x1b[1;32mGreen Text\x1b[0m\r\n");
+    try stream.nextSlice("\x1b[1;32mGreen Text\x1b[0m\r\n");
 
     // Cursor positioning: ESC[1;1H = move to row 1, column 1
-    stream.nextSlice("\x1b[1;1HTop-left corner\r\n");
+    try stream.nextSlice("\x1b[1;1HTop-left corner\r\n");
 
     // Cursor movement: ESC[5B = move down 5 lines
-    stream.nextSlice("\x1b[5B");
-    stream.nextSlice("Moved down!\r\n");
+    try stream.nextSlice("\x1b[5B");
+    try stream.nextSlice("Moved down!\r\n");
 
     // Erase line: ESC[2K = clear entire line
-    stream.nextSlice("\x1b[2K");
-    stream.nextSlice("New content\r\n");
+    try stream.nextSlice("\x1b[2K");
+    try stream.nextSlice("New content\r\n");
 
     // Multiple lines
-    stream.nextSlice("Line A\r\nLine B\r\nLine C\r\n");
+    try stream.nextSlice("Line A\r\nLine B\r\nLine C\r\n");
 
     // Get the final terminal state as a plain string
     const str = try t.plainString(alloc);

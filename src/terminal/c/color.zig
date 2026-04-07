@@ -1,4 +1,3 @@
-const lib = @import("../lib.zig");
 const color = @import("../color.zig");
 
 pub fn rgb_get(
@@ -6,7 +5,7 @@ pub fn rgb_get(
     r: *u8,
     g: *u8,
     b: *u8,
-) callconv(lib.calling_conv) void {
+) callconv(.c) void {
     r.* = c.r;
     g.* = c.g;
     b.* = c.b;

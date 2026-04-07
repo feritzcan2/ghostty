@@ -27,8 +27,6 @@ class GhosttyCustomConfigCase: XCTestCase {
         true
     }
 
-    static let defaultsSuiteName: String = "GHOSTTY_UI_TESTS"
-
     var configFile: URL?
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -49,14 +47,13 @@ class GhosttyCustomConfigCase: XCTestCase {
         try newConfig.write(to: configFile!, atomically: true, encoding: .utf8)
     }
 
-    func ghosttyApplication(defaultsSuite: String = GhosttyCustomConfigCase.defaultsSuiteName) throws -> XCUIApplication {
+    func ghosttyApplication() throws -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments.append(contentsOf: ["-ApplePersistenceIgnoreState", "YES"])
         guard let configFile else {
             return app
         }
         app.launchEnvironment["GHOSTTY_CONFIG_PATH"] = configFile.path
-        app.launchEnvironment["GHOSTTY_USER_DEFAULTS_SUITE"] = defaultsSuite
         return app
     }
 }

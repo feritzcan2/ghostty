@@ -301,8 +301,9 @@ class BaseTerminalController: NSWindowController,
             // Our focus state requires that this window is key and our currently
             // focused surface is the surface in this view.
             let focused: Bool = (window?.isKeyWindow ?? false) &&
-                surfaceView == focusedSurface &&
-                surfaceView.isFirstResponder
+                !commandPaletteIsShowing &&
+                focusedSurface != nil &&
+                surfaceView == focusedSurface!
             surfaceView.focusDidChange(focused)
         }
     }
@@ -1238,11 +1239,9 @@ class BaseTerminalController: NSWindowController,
             }
         }
 
-        // Becoming key can race with responder updates when activating a window.
-        // Sync on the next runloop so split focus has settled first.
-        DispatchQueue.main.async {
-            self.syncFocusToSurfaceTree()
-        }
+        // Becoming/losing key means we have to notify our surface(s) that we have focus
+        // so things like cursors blink, pty events are sent, etc.
+        self.syncFocusToSurfaceTree()
     }
 
     func windowDidResignKey(_ notification: Notification) {

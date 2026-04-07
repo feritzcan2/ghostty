@@ -13,16 +13,25 @@ const PayloadKind = enum {
 };
 
 pub fn parse(parser: *Parser, _: ?u8) ?*Command {
-    const cap = if (parser.capture) |*c| c else {
+    const writer = parser.writer orelse {
         parser.state = .invalid;
         return null;
     };
 
-    var data = cap.trailing();
+    // Ensure sentinel termination.
+    writer.writeByte(0) catch {
+        parser.state = .invalid;
+        return null;
+    };
+
+    var data = writer.buffered();
     if (data.len == 0) {
         parser.state = .invalid;
         return null;
     }
+
+    // Drop sentinel.
+    data = data[0 .. data.len - 1];
 
     const meta_end = std.mem.indexOfScalar(u8, data, ';') orelse {
         parser.state = .invalid;

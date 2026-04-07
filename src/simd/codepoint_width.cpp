@@ -6,7 +6,6 @@
 #include <hwy/print-inl.h>
 
 #include <cassert>
-#include <iterator>
 
 HWY_BEFORE_NAMESPACE();
 namespace ghostty {

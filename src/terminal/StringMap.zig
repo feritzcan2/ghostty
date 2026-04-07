@@ -11,12 +11,6 @@ const Screen = @import("Screen.zig");
 const Pin = @import("PageList.zig").Pin;
 const Allocator = std.mem.Allocator;
 
-// Retry budget for StringMap regex searches.
-//
-// Units are Oniguruma retry steps (internal backtracking/retry counter),
-// not bytes/characters/time.
-const oni_search_retry_limit = 100_000;
-
 string: [:0]const u8,
 map: []Pin,
 
@@ -50,26 +44,11 @@ pub const SearchIterator = struct {
     pub fn next(self: *SearchIterator) !?Match {
         if (self.offset >= self.map.string.len) return null;
 
-        // Use per-search match params so we can bound regex retry steps
-        // (Oniguruma's internal backtracking work counter).
-        var match_param = try oni.MatchParam.init();
-        defer match_param.deinit();
-        try match_param.setRetryLimitInSearch(oni_search_retry_limit);
-
-        var region = self.regex.searchWithParam(
+        var region = self.regex.search(
             self.map.string[self.offset..],
             .{},
-            &match_param,
         ) catch |err| switch (err) {
-            // Retry/stack-limit errors mean we hit our work budget and
-            // aborted matching.
-            // For iterator callers this is equivalent to "no further matches".
-            error.Mismatch,
-            error.RetryLimitInMatchOver,
-            error.RetryLimitInSearchOver,
-            error.MatchStackLimitOver,
-            error.SubexpCallLimitInSearchOver,
-            => {
+            error.Mismatch => {
                 self.offset = self.map.string.len;
                 return null;
             },

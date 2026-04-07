@@ -201,9 +201,6 @@ pub const Action = union(Key) {
     /// Set the title of the target to the requested value.
     set_title: SetTitle,
 
-    /// Set the tab title override for the target's tab.
-    set_tab_title: SetTitle,
-
     /// Set the title of the target to a prompted value. It is up to
     /// the apprt to prompt. The value specifies whether to prompt for the
     /// surface title or the tab title.
@@ -378,7 +375,6 @@ pub const Action = union(Key) {
         render_inspector,
         desktop_notification,
         set_title,
-        set_tab_title,
         prompt_title,
         pwd,
         mouse_shape,

@@ -152,12 +152,12 @@ fn parseIdentifier(str: []const u8) ?[]const u8 {
 pub fn parse(parser: *Parser, terminator_ch: ?u8) ?*Command {
     assert(parser.state == .@"5522");
 
-    const cap = if (parser.capture) |*c| c else {
+    const writer = parser.writer orelse {
         parser.state = .invalid;
         return null;
     };
 
-    const data = cap.trailing();
+    const data = writer.buffered();
 
     const metadata: []const u8, const payload: ?[]const u8 = result: {
         const start = std.mem.indexOfScalar(u8, data, ';') orelse break :result .{ data, null };

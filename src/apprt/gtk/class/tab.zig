@@ -5,7 +5,6 @@ const glib = @import("glib");
 const gobject = @import("gobject");
 const gtk = @import("gtk");
 
-const configpkg = @import("../../../config.zig");
 const apprt = @import("../../../apprt.zig");
 const CoreSurface = @import("../../../Surface.zig");
 const ext = @import("../ext.zig");
@@ -187,34 +186,22 @@ pub const Tab = extern struct {
         }
     }
 
-    pub fn new(config: ?*Config, overrides: struct {
-        command: ?configpkg.Command = null,
-        working_directory: ?[:0]const u8 = null,
-        title: ?[:0]const u8 = null,
+    fn init(self: *Self, _: *Class) callconv(.c) void {
+        gtk.Widget.initTemplate(self.as(gtk.Widget));
 
-        pub const none: @This() = .{};
-    }) *Self {
-        const tab = gobject.ext.newInstance(Tab, .{});
-
-        const priv: *Private = tab.private();
-
-        if (config) |c| priv.config = c.ref();
+        // Init our actions
+        self.initActionMap();
 
         // If our configuration is null then we get the configuration
         // from the application.
+        const priv = self.private();
         if (priv.config == null) {
             const app = Application.default();
             priv.config = app.getConfig();
         }
 
-        tab.as(gobject.Object).notifyByPspec(properties.config.impl.param_spec);
-
         // Create our initial surface in the split tree.
-        priv.split_tree.newSplit(.right, null, .{
-            .command = overrides.command,
-            .working_directory = overrides.working_directory,
-            .title = overrides.title,
-        }) catch |err| switch (err) {
+        priv.split_tree.newSplit(.right, null) catch |err| switch (err) {
             error.OutOfMemory => {
                 // TODO: We should make our "no surfaces" state more aesthetically
                 // pleasing and show something like an "Oops, something went wrong"
@@ -222,15 +209,6 @@ pub const Tab = extern struct {
                 @panic("oom");
             },
         };
-
-        return tab;
-    }
-
-    fn init(self: *Self, _: *Class) callconv(.c) void {
-        gtk.Widget.initTemplate(self.as(gtk.Widget));
-
-        // Init our actions
-        self.initActionMap();
     }
 
     fn initActionMap(self: *Self) void {

@@ -6,8 +6,6 @@
 #endif
 
 #include <hwy/highway.h>
-
-#include <cstddef>
 #include <optional>
 
 HWY_BEFORE_NAMESPACE();

@@ -5,11 +5,10 @@ const assert = @import("../quirks.zig").inlineAssert;
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 const simd = @import("../simd/main.zig");
-const lib = @import("lib.zig");
+const lib = @import("../lib/main.zig");
 const Parser = @import("Parser.zig");
 const ansi = @import("ansi.zig");
 const charsets = @import("charsets.zig");
-const device_attributes = @import("device_attributes.zig");
 const device_status = @import("device_status.zig");
 const csi = @import("csi.zig");
 const kitty = @import("kitty.zig");
@@ -17,7 +16,7 @@ const modes = @import("modes.zig");
 const osc = @import("osc.zig");
 const sgr = @import("sgr.zig");
 const UTF8Decoder = @import("UTF8Decoder.zig");
-const MouseShape = @import("mouse.zig").Shape;
+const MouseShape = @import("mouse_shape.zig").MouseShape;
 
 const log = std.log.scoped(.stream);
 
@@ -28,6 +27,8 @@ const log = std.log.scoped(.stream);
 /// debugging an issue in the SIMD code then you'll need to
 /// do something else.
 const debug = false;
+
+const lib_target: lib.Target = if (build_options.c_abi) .c else .zig;
 
 /// The possible actions that can be emitted by the Stream
 /// function for handling.
@@ -96,7 +97,7 @@ pub const Action = union(Key) {
     title_push: u16,
     title_pop: u16,
     xtversion,
-    device_attributes: device_attributes.Req,
+    device_attributes: ansi.DeviceAttributeReq,
     device_status: DeviceStatus,
     kitty_keyboard_query,
     kitty_keyboard_push: KittyKeyboardFlags,
@@ -127,7 +128,7 @@ pub const Action = union(Key) {
     semantic_prompt: SemanticPrompt,
 
     pub const Key = lib.Enum(
-        lib.target,
+        lib_target,
         &.{
             "print",
             "print_repeat",
@@ -227,7 +228,7 @@ pub const Action = union(Key) {
 
     /// C ABI functions.
     const c_union = lib.TaggedUnion(
-        lib.target,
+        lib_target,
         @This(),
         // TODO: Before shipping an ABI-compatible libghostty, verify this.
         // This was just arbitrarily chosen for now.
@@ -252,7 +253,7 @@ pub const Action = union(Key) {
         }
     };
 
-    pub const InvokeCharset = lib.Struct(lib.target, struct {
+    pub const InvokeCharset = lib.Struct(lib_target, struct {
         bank: charsets.ActiveSlot,
         charset: charsets.Slots,
         locking: bool,
@@ -382,7 +383,7 @@ pub const Action = union(Key) {
         }
     };
 
-    pub const ConfigureCharset = lib.Struct(lib.target, struct {
+    pub const ConfigureCharset = lib.Struct(lib_target, struct {
         slot: charsets.Slots,
         charset: charsets.Charset,
     });
@@ -405,7 +406,7 @@ pub const Action = union(Key) {
 /// Returns a type that can process a stream of tty control characters.
 /// This will call the `vt` function on type T with the following signature:
 ///
-///   fn(comptime action: Action.Key, value: Action.Value(action)) void
+///   fn(comptime action: Action.Key, value: Action.Value(action)) !void
 ///
 /// The handler type T can choose to react to whatever actions it cares
 /// about in its pursuit of implementing a terminal emulator or other
@@ -418,12 +419,11 @@ pub const Action = union(Key) {
 /// e.g. you don't need to pay a conditional branching cost on every single
 /// action because the Zig compiler codegens separate code paths for every
 /// single action at comptime.
-pub fn Stream(comptime H: type) type {
+pub fn Stream(comptime Handler: type) type {
     return struct {
         const Self = @This();
 
         pub const Action = streampkg.Action;
-        pub const Handler = H;
 
         const T = switch (@typeInfo(Handler)) {
             .pointer => |p| p.child,
@@ -468,11 +468,11 @@ pub fn Stream(comptime H: type) type {
         }
 
         /// Process a string of characters.
-        pub inline fn nextSlice(self: *Self, input: []const u8) void {
+        pub inline fn nextSlice(self: *Self, input: []const u8) !void {
             // Disable SIMD optimizations if build requests it or if our
             // manual debug mode is on.
             if (comptime debug or !build_options.simd) {
-                for (input) |c| self.next(c);
+                for (input) |c| try self.next(c);
                 return;
             }
 
@@ -485,17 +485,13 @@ pub fn Stream(comptime H: type) type {
             var i: usize = 0;
             while (true) {
                 const len = @min(cp_buf.len, input.len - i);
-                self.nextSliceCapped(input[i .. i + len], &cp_buf);
+                try self.nextSliceCapped(input[i .. i + len], &cp_buf);
                 i += len;
                 if (i >= input.len) break;
             }
         }
 
-        inline fn nextSliceCapped(
-            self: *Self,
-            input: []const u8,
-            cp_buf: []u32,
-        ) void {
+        inline fn nextSliceCapped(self: *Self, input: []const u8, cp_buf: []u32) !void {
             assert(input.len <= cp_buf.len);
 
             var offset: usize = 0;
@@ -504,7 +500,7 @@ pub fn Stream(comptime H: type) type {
             // a code sequence, we continue until it's not.
             while (self.utf8decoder.state != 0) {
                 if (offset >= input.len) return;
-                self.nextUtf8(input[offset]);
+                try self.nextUtf8(input[offset]);
                 offset += 1;
             }
             if (offset >= input.len) return;
@@ -512,9 +508,9 @@ pub fn Stream(comptime H: type) type {
             // If we're not in the ground state then we process until
             // we are. This can happen if the last chunk of input put us
             // in the middle of a control sequence.
-            offset += self.consumeUntilGround(input[offset..]);
+            offset += try self.consumeUntilGround(input[offset..]);
             if (offset >= input.len) return;
-            offset += self.consumeAllEscapes(input[offset..]);
+            offset += try self.consumeAllEscapes(input[offset..]);
 
             // If we're in the ground state then we can use SIMD to process
             // input until we see an ESC (0x1B), since all other characters
@@ -523,9 +519,9 @@ pub fn Stream(comptime H: type) type {
                 const res = simd.vt.utf8DecodeUntilControlSeq(input[offset..], cp_buf);
                 for (cp_buf[0..res.decoded]) |cp| {
                     if (cp <= 0xF) {
-                        self.execute(@intCast(cp));
+                        try self.execute(@intCast(cp));
                     } else {
-                        self.print(@intCast(cp));
+                        try self.print(@intCast(cp));
                     }
                 }
                 // Consume the bytes we just processed.
@@ -538,12 +534,12 @@ pub fn Stream(comptime H: type) type {
                 // to the scalar parser.
                 if (input[offset] != 0x1B) {
                     const rem = input[offset..];
-                    for (rem) |c| self.nextUtf8(c);
+                    for (rem) |c| try self.nextUtf8(c);
                     return;
                 }
 
                 // Process control sequences until we run out.
-                offset += self.consumeAllEscapes(input[offset..]);
+                offset += try self.consumeAllEscapes(input[offset..]);
             }
         }
 
@@ -552,13 +548,13 @@ pub fn Stream(comptime H: type) type {
         ///
         /// Expects input to start with 0x1B, use consumeUntilGround first
         /// if the stream may be in the middle of an escape sequence.
-        inline fn consumeAllEscapes(self: *Self, input: []const u8) usize {
+        inline fn consumeAllEscapes(self: *Self, input: []const u8) !usize {
             var offset: usize = 0;
             while (input[offset] == 0x1B) {
                 self.parser.state = .escape;
                 self.parser.clear();
                 offset += 1;
-                offset += self.consumeUntilGround(input[offset..]);
+                offset += try self.consumeUntilGround(input[offset..]);
                 if (offset >= input.len) return input.len;
             }
             return offset;
@@ -566,11 +562,11 @@ pub fn Stream(comptime H: type) type {
 
         /// Parses escape sequences until the parser reaches the ground state.
         /// Returns the number of bytes consumed from the provided input.
-        inline fn consumeUntilGround(self: *Self, input: []const u8) usize {
+        inline fn consumeUntilGround(self: *Self, input: []const u8) !usize {
             var offset: usize = 0;
             while (self.parser.state != .ground) {
                 if (offset >= input.len) return input.len;
-                self.nextNonUtf8(input[offset]);
+                try self.nextNonUtf8(input[offset]);
                 offset += 1;
             }
             return offset;
@@ -579,27 +575,27 @@ pub fn Stream(comptime H: type) type {
         /// Like nextSlice but takes one byte and is necessarily a scalar
         /// operation that can't use SIMD. Prefer nextSlice if you can and
         /// try to get multiple bytes at once.
-        pub inline fn next(self: *Self, c: u8) void {
+        pub inline fn next(self: *Self, c: u8) !void {
             // The scalar path can be responsible for decoding UTF-8.
             if (self.parser.state == .ground) {
-                self.nextUtf8(c);
+                try self.nextUtf8(c);
                 return;
             }
 
-            self.nextNonUtf8(c);
+            try self.nextNonUtf8(c);
         }
 
         /// Process the next byte and print as necessary.
         ///
         /// This assumes we're in the UTF-8 decoding state. If we may not
         /// be in the UTF-8 decoding state call nextSlice or next.
-        inline fn nextUtf8(self: *Self, c: u8) void {
+        inline fn nextUtf8(self: *Self, c: u8) !void {
             assert(self.parser.state == .ground);
 
             const res = self.utf8decoder.next(c);
             const consumed = res[1];
             if (res[0]) |codepoint| {
-                self.handleCodepoint(codepoint);
+                try self.handleCodepoint(codepoint);
             }
             if (!consumed) {
                 // We optimize for the scenario where the text being
@@ -612,7 +608,7 @@ pub fn Stream(comptime H: type) type {
                 // to not consume the byte twice in a row.
                 assert(retry[1] == true);
                 if (retry[0]) |codepoint| {
-                    self.handleCodepoint(codepoint);
+                    try self.handleCodepoint(codepoint);
                 }
             }
         }
@@ -621,7 +617,7 @@ pub fn Stream(comptime H: type) type {
         ///
         /// This function is abstracted this way to handle the case where
         /// the decoder emits a 0x1B after rejecting an ill-formed sequence.
-        inline fn handleCodepoint(self: *Self, c: u21) void {
+        inline fn handleCodepoint(self: *Self, c: u21) !void {
             // We need to increase the eval branch limit because a lot of
             // tests end up running almost completely at comptime due to
             // a chain of inline functions.
@@ -630,7 +626,7 @@ pub fn Stream(comptime H: type) type {
             // C0 control
             if (c <= 0xF) {
                 @branchHint(.unlikely);
-                self.execute(@intCast(c));
+                try self.execute(@intCast(c));
                 return;
             }
             // ESC
@@ -639,14 +635,14 @@ pub fn Stream(comptime H: type) type {
                 self.parser.clear();
                 return;
             }
-            self.print(@intCast(c));
+            try self.print(@intCast(c));
         }
 
         /// Process the next character and call any callbacks if necessary.
         ///
         /// This assumes that we're not in the UTF-8 decoding state. If
         /// we may be in the UTF-8 decoding state call nextSlice or next.
-        fn nextNonUtf8(self: *Self, c: u8) void {
+        fn nextNonUtf8(self: *Self, c: u8) !void {
             assert(self.parser.state != .ground);
 
             // Fast path for CSI entry.
@@ -663,7 +659,7 @@ pub fn Stream(comptime H: type) type {
                 @branchHint(.likely);
                 switch (c) {
                     // A C0 escape (yes, this is valid):
-                    0x00...0x0F => self.execute(c),
+                    0x00...0x0F => try self.execute(c),
                     // We ignore C0 escapes > 0xF since execute
                     // doesn't have processing for them anyway:
                     0x10...0x17, 0x19, 0x1C...0x1F => {},
@@ -729,32 +725,32 @@ pub fn Stream(comptime H: type) type {
                 }
 
                 switch (action) {
-                    .print => |p| self.print(p),
-                    .execute => |code| self.execute(code),
-                    .csi_dispatch => |csi_action| self.csiDispatch(csi_action),
-                    .esc_dispatch => |esc| self.escDispatch(esc),
-                    .osc_dispatch => |cmd| self.oscDispatch(cmd),
-                    .dcs_hook => |dcs| self.handler.vt(.dcs_hook, dcs),
-                    .dcs_put => |code| self.handler.vt(.dcs_put, code),
-                    .dcs_unhook => self.handler.vt(.dcs_unhook, {}),
-                    .apc_start => self.handler.vt(.apc_start, {}),
-                    .apc_put => |code| self.handler.vt(.apc_put, code),
-                    .apc_end => self.handler.vt(.apc_end, {}),
+                    .print => |p| try self.print(p),
+                    .execute => |code| try self.execute(code),
+                    .csi_dispatch => |csi_action| try self.csiDispatch(csi_action),
+                    .esc_dispatch => |esc| try self.escDispatch(esc),
+                    .osc_dispatch => |cmd| try self.oscDispatch(cmd),
+                    .dcs_hook => |dcs| try self.handler.vt(.dcs_hook, dcs),
+                    .dcs_put => |code| try self.handler.vt(.dcs_put, code),
+                    .dcs_unhook => try self.handler.vt(.dcs_unhook, {}),
+                    .apc_start => try self.handler.vt(.apc_start, {}),
+                    .apc_put => |code| try self.handler.vt(.apc_put, code),
+                    .apc_end => try self.handler.vt(.apc_end, {}),
                 }
             }
         }
 
-        inline fn print(self: *Self, c: u21) void {
-            self.handler.vt(.print, .{ .cp = c });
+        pub inline fn print(self: *Self, c: u21) !void {
+            try self.handler.vt(.print, .{ .cp = c });
         }
 
-        inline fn execute(self: *Self, c: u8) void {
+        pub inline fn execute(self: *Self, c: u8) !void {
             // If the character is > 0x7F, it's a C1 (8-bit) control,
             // which is strictly equivalent to `ESC` plus `c - 0x40`.
             if (c > 0x7F) {
                 @branchHint(.unlikely);
                 log.info("executing C1 0x{x} as ESC {c}", .{ c, c - 0x40 });
-                self.escDispatch(.{
+                try self.escDispatch(.{
                     .intermediates = &.{},
                     .final = c - 0x40,
                 });
@@ -767,20 +763,20 @@ pub fn Stream(comptime H: type) type {
                 // We ignore SOH/STX: https://github.com/microsoft/terminal/issues/10786
                 .NUL, .SOH, .STX => {},
 
-                .ENQ => self.handler.vt(.enquiry, {}),
-                .BEL => self.handler.vt(.bell, {}),
-                .BS => self.handler.vt(.backspace, {}),
-                .HT => self.handler.vt(.horizontal_tab, 1),
-                .LF, .VT, .FF => self.handler.vt(.linefeed, {}),
-                .CR => self.handler.vt(.carriage_return, {}),
-                .SO => self.handler.vt(.invoke_charset, .{ .bank = .GL, .charset = .G1, .locking = false }),
-                .SI => self.handler.vt(.invoke_charset, .{ .bank = .GL, .charset = .G0, .locking = false }),
+                .ENQ => try self.handler.vt(.enquiry, {}),
+                .BEL => try self.handler.vt(.bell, {}),
+                .BS => try self.handler.vt(.backspace, {}),
+                .HT => try self.handler.vt(.horizontal_tab, 1),
+                .LF, .VT, .FF => try self.handler.vt(.linefeed, {}),
+                .CR => try self.handler.vt(.carriage_return, {}),
+                .SO => try self.handler.vt(.invoke_charset, .{ .bank = .GL, .charset = .G1, .locking = false }),
+                .SI => try self.handler.vt(.invoke_charset, .{ .bank = .GL, .charset = .G0, .locking = false }),
 
                 else => log.warn("invalid C0 character, ignoring: 0x{x}", .{c}),
             }
         }
 
-        inline fn csiDispatch(self: *Self, input: Parser.Action.CSI) void {
+        inline fn csiDispatch(self: *Self, input: Parser.Action.CSI) !void {
             // The branch hints here are based on real world data
             // which indicates that the most common CSI finals are:
             //
@@ -810,7 +806,7 @@ pub fn Stream(comptime H: type) type {
                 'A', 'k' => {
                     @branchHint(.likely);
                     switch (input.intermediates.len) {
-                        0 => self.handler.vt(.cursor_up, .{
+                        0 => try self.handler.vt(.cursor_up, .{
                             .value = switch (input.params.len) {
                                 0 => 1,
                                 1 => input.params[0],
@@ -831,7 +827,7 @@ pub fn Stream(comptime H: type) type {
 
                 // CUD - Cursor Down
                 'B' => switch (input.intermediates.len) {
-                    0 => self.handler.vt(.cursor_down, .{
+                    0 => try self.handler.vt(.cursor_down, .{
                         .value = switch (input.params.len) {
                             0 => 1,
                             1 => input.params[0],
@@ -853,7 +849,7 @@ pub fn Stream(comptime H: type) type {
                 'C' => {
                     @branchHint(.likely);
                     switch (input.intermediates.len) {
-                        0 => self.handler.vt(.cursor_right, .{
+                        0 => try self.handler.vt(.cursor_right, .{
                             .value = switch (input.params.len) {
                                 0 => 1,
                                 1 => input.params[0],
@@ -874,7 +870,7 @@ pub fn Stream(comptime H: type) type {
 
                 // CUB - Cursor Left
                 'D', 'j' => switch (input.intermediates.len) {
-                    0 => self.handler.vt(.cursor_left, .{
+                    0 => try self.handler.vt(.cursor_left, .{
                         .value = switch (input.params.len) {
                             0 => 1,
                             1 => input.params[0],
@@ -895,7 +891,7 @@ pub fn Stream(comptime H: type) type {
                 // CNL - Cursor Next Line
                 'E' => switch (input.intermediates.len) {
                     0 => {
-                        self.handler.vt(.cursor_down, .{
+                        try self.handler.vt(.cursor_down, .{
                             .value = switch (input.params.len) {
                                 0 => 1,
                                 1 => input.params[0],
@@ -906,7 +902,7 @@ pub fn Stream(comptime H: type) type {
                                 },
                             },
                         });
-                        self.handler.vt(.carriage_return, {});
+                        try self.handler.vt(.carriage_return, {});
                     },
 
                     else => log.warn(
@@ -918,7 +914,7 @@ pub fn Stream(comptime H: type) type {
                 // CPL - Cursor Previous Line
                 'F' => switch (input.intermediates.len) {
                     0 => {
-                        self.handler.vt(.cursor_up, .{
+                        try self.handler.vt(.cursor_up, .{
                             .value = switch (input.params.len) {
                                 0 => 1,
                                 1 => input.params[0],
@@ -929,7 +925,7 @@ pub fn Stream(comptime H: type) type {
                                 },
                             },
                         });
-                        self.handler.vt(.carriage_return, {});
+                        try self.handler.vt(.carriage_return, {});
                     },
 
                     else => log.warn(
@@ -941,7 +937,7 @@ pub fn Stream(comptime H: type) type {
                 // HPA - Cursor Horizontal Position Absolute
                 // TODO: test
                 'G', '`' => switch (input.intermediates.len) {
-                    0 => self.handler.vt(.cursor_col, .{
+                    0 => try self.handler.vt(.cursor_col, .{
                         .value = switch (input.params.len) {
                             0 => 1,
                             1 => input.params[0],
@@ -975,7 +971,7 @@ pub fn Stream(comptime H: type) type {
                                     return;
                                 },
                             };
-                            self.handler.vt(.cursor_pos, pos);
+                            try self.handler.vt(.cursor_pos, pos);
                         },
 
                         else => log.warn(
@@ -987,7 +983,7 @@ pub fn Stream(comptime H: type) type {
 
                 // CHT - Cursor Horizontal Tabulation
                 'I' => switch (input.intermediates.len) {
-                    0 => self.handler.vt(.horizontal_tab, switch (input.params.len) {
+                    0 => try self.handler.vt(.horizontal_tab, switch (input.params.len) {
                         0 => 1,
                         1 => input.params[0],
                         else => {
@@ -1027,11 +1023,11 @@ pub fn Stream(comptime H: type) type {
                     };
 
                     switch (mode) {
-                        .below => self.handler.vt(.erase_display_below, protected),
-                        .above => self.handler.vt(.erase_display_above, protected),
-                        .complete => self.handler.vt(.erase_display_complete, protected),
-                        .scrollback => self.handler.vt(.erase_display_scrollback, protected),
-                        .scroll_complete => self.handler.vt(.erase_display_scroll_complete, protected),
+                        .below => try self.handler.vt(.erase_display_below, protected),
+                        .above => try self.handler.vt(.erase_display_above, protected),
+                        .complete => try self.handler.vt(.erase_display_complete, protected),
+                        .scrollback => try self.handler.vt(.erase_display_scrollback, protected),
+                        .scroll_complete => try self.handler.vt(.erase_display_scroll_complete, protected),
                     }
                 },
 
@@ -1063,10 +1059,10 @@ pub fn Stream(comptime H: type) type {
                     };
 
                     switch (mode) {
-                        .right => self.handler.vt(.erase_line_right, protected),
-                        .left => self.handler.vt(.erase_line_left, protected),
-                        .complete => self.handler.vt(.erase_line_complete, protected),
-                        .right_unless_pending_wrap => self.handler.vt(.erase_line_right_unless_pending_wrap, protected),
+                        .right => try self.handler.vt(.erase_line_right, protected),
+                        .left => try self.handler.vt(.erase_line_left, protected),
+                        .complete => try self.handler.vt(.erase_line_complete, protected),
+                        .right_unless_pending_wrap => try self.handler.vt(.erase_line_right_unless_pending_wrap, protected),
                         _ => {
                             @branchHint(.unlikely);
                             log.warn("invalid erase line mode: {}", .{mode});
@@ -1077,7 +1073,7 @@ pub fn Stream(comptime H: type) type {
                 // IL - Insert Lines
                 // TODO: test
                 'L' => switch (input.intermediates.len) {
-                    0 => self.handler.vt(.insert_lines, switch (input.params.len) {
+                    0 => try self.handler.vt(.insert_lines, switch (input.params.len) {
                         0 => 1,
                         1 => input.params[0],
                         else => {
@@ -1095,7 +1091,7 @@ pub fn Stream(comptime H: type) type {
                 // DL - Delete Lines
                 // TODO: test
                 'M' => switch (input.intermediates.len) {
-                    0 => self.handler.vt(.delete_lines, switch (input.params.len) {
+                    0 => try self.handler.vt(.delete_lines, switch (input.params.len) {
                         0 => 1,
                         1 => input.params[0],
                         else => {
@@ -1112,7 +1108,7 @@ pub fn Stream(comptime H: type) type {
 
                 // Delete Character (DCH)
                 'P' => switch (input.intermediates.len) {
-                    0 => self.handler.vt(.delete_chars, switch (input.params.len) {
+                    0 => try self.handler.vt(.delete_chars, switch (input.params.len) {
                         0 => 1,
                         1 => input.params[0],
                         else => {
@@ -1130,7 +1126,7 @@ pub fn Stream(comptime H: type) type {
                 // Scroll Up (SD)
 
                 'S' => switch (input.intermediates.len) {
-                    0 => self.handler.vt(.scroll_up, switch (input.params.len) {
+                    0 => try self.handler.vt(.scroll_up, switch (input.params.len) {
                         0 => 1,
                         1 => input.params[0],
                         else => {
@@ -1147,7 +1143,7 @@ pub fn Stream(comptime H: type) type {
 
                 // Scroll Down (SD)
                 'T' => switch (input.intermediates.len) {
-                    0 => self.handler.vt(.scroll_down, switch (input.params.len) {
+                    0 => try self.handler.vt(.scroll_down, switch (input.params.len) {
                         0 => 1,
                         1 => input.params[0],
                         else => {
@@ -1168,7 +1164,7 @@ pub fn Stream(comptime H: type) type {
                         if (input.params.len == 0 or
                             (input.params.len == 1 and input.params[0] == 0))
                         {
-                            self.handler.vt(.tab_set, {});
+                            try self.handler.vt(.tab_set, {});
                             return;
                         }
 
@@ -1178,9 +1174,9 @@ pub fn Stream(comptime H: type) type {
                             1 => switch (input.params[0]) {
                                 0 => unreachable,
 
-                                2 => self.handler.vt(.tab_clear_current, {}),
+                                2 => try self.handler.vt(.tab_clear_current, {}),
 
-                                5 => self.handler.vt(.tab_clear_all, {}),
+                                5 => try self.handler.vt(.tab_clear_all, {}),
 
                                 else => {},
                             },
@@ -1196,7 +1192,7 @@ pub fn Stream(comptime H: type) type {
                         input.params.len == 1 and
                         input.params[0] == 5)
                     {
-                        self.handler.vt(.tab_reset, {});
+                        try self.handler.vt(.tab_reset, {});
                     } else log.warn("invalid cursor tabulation control: {f}", .{input}),
 
                     else => log.warn(
@@ -1209,7 +1205,7 @@ pub fn Stream(comptime H: type) type {
                 'X' => {
                     @branchHint(.likely);
                     switch (input.intermediates.len) {
-                        0 => self.handler.vt(.erase_chars, switch (input.params.len) {
+                        0 => try self.handler.vt(.erase_chars, switch (input.params.len) {
                             0 => 1,
                             1 => input.params[0],
                             else => {
@@ -1228,7 +1224,7 @@ pub fn Stream(comptime H: type) type {
 
                 // CHT - Cursor Horizontal Tabulation Back
                 'Z' => switch (input.intermediates.len) {
-                    0 => self.handler.vt(.horizontal_tab_back, switch (input.params.len) {
+                    0 => try self.handler.vt(.horizontal_tab_back, switch (input.params.len) {
                         0 => 1,
                         1 => input.params[0],
                         else => {
@@ -1245,7 +1241,7 @@ pub fn Stream(comptime H: type) type {
 
                 // HPR - Cursor Horizontal Position Relative
                 'a' => switch (input.intermediates.len) {
-                    0 => self.handler.vt(.cursor_col_relative, .{
+                    0 => try self.handler.vt(.cursor_col_relative, .{
                         .value = switch (input.params.len) {
                             0 => 1,
                             1 => input.params[0],
@@ -1264,7 +1260,7 @@ pub fn Stream(comptime H: type) type {
 
                 // Repeat Previous Char (REP)
                 'b' => switch (input.intermediates.len) {
-                    0 => self.handler.vt(.print_repeat, switch (input.params.len) {
+                    0 => try self.handler.vt(.print_repeat, switch (input.params.len) {
                         0 => 1,
                         1 => input.params[0],
                         else => {
@@ -1281,7 +1277,7 @@ pub fn Stream(comptime H: type) type {
 
                 // c - Device Attributes (DA1)
                 'c' => {
-                    const req: ?device_attributes.Req = switch (input.intermediates.len) {
+                    const req: ?ansi.DeviceAttributeReq = switch (input.intermediates.len) {
                         0 => .primary,
                         1 => switch (input.intermediates[0]) {
                             '>' => .secondary,
@@ -1292,7 +1288,7 @@ pub fn Stream(comptime H: type) type {
                     };
 
                     if (req) |r| {
-                        self.handler.vt(.device_attributes, r);
+                        try self.handler.vt(.device_attributes, r);
                     } else {
                         log.warn("invalid device attributes command: {f}", .{input});
                         return;
@@ -1301,7 +1297,7 @@ pub fn Stream(comptime H: type) type {
 
                 // VPA - Cursor Vertical Position Absolute
                 'd' => switch (input.intermediates.len) {
-                    0 => self.handler.vt(.cursor_row, .{
+                    0 => try self.handler.vt(.cursor_row, .{
                         .value = switch (input.params.len) {
                             0 => 1,
                             1 => input.params[0],
@@ -1320,7 +1316,7 @@ pub fn Stream(comptime H: type) type {
 
                 // VPR - Cursor Vertical Position Relative
                 'e' => switch (input.intermediates.len) {
-                    0 => self.handler.vt(.cursor_row_relative, .{
+                    0 => try self.handler.vt(.cursor_row_relative, .{
                         .value = switch (input.params.len) {
                             0 => 1,
                             1 => input.params[0],
@@ -1352,8 +1348,8 @@ pub fn Stream(comptime H: type) type {
                             },
                         };
                         switch (mode) {
-                            .current => self.handler.vt(.tab_clear_current, {}),
-                            .all => self.handler.vt(.tab_clear_all, {}),
+                            .current => try self.handler.vt(.tab_clear_current, {}),
+                            .all => try self.handler.vt(.tab_clear_all, {}),
                             _ => log.warn("unknown tab clear mode: {}", .{mode}),
                         }
                     },
@@ -1378,7 +1374,7 @@ pub fn Stream(comptime H: type) type {
 
                     for (input.params) |mode_int| {
                         if (modes.modeFromInt(mode_int, ansi_mode)) |mode| {
-                            self.handler.vt(.set_mode, .{ .mode = mode });
+                            try self.handler.vt(.set_mode, .{ .mode = mode });
                         } else {
                             log.warn("unimplemented mode: {}", .{mode_int});
                         }
@@ -1399,7 +1395,7 @@ pub fn Stream(comptime H: type) type {
 
                     for (input.params) |mode_int| {
                         if (modes.modeFromInt(mode_int, ansi_mode)) |mode| {
-                            self.handler.vt(.reset_mode, .{ .mode = mode });
+                            try self.handler.vt(.reset_mode, .{ .mode = mode });
                         } else {
                             log.warn("unimplemented mode: {}", .{mode_int});
                         }
@@ -1420,7 +1416,7 @@ pub fn Stream(comptime H: type) type {
                             };
                             while (p.next()) |attr| {
                                 // log.info("SGR attribute: {}", .{attr});
-                                self.handler.vt(.set_attribute, attr);
+                                try self.handler.vt(.set_attribute, attr);
                             }
                         },
 
@@ -1428,7 +1424,7 @@ pub fn Stream(comptime H: type) type {
                             '>' => blk: {
                                 if (input.params.len == 0) {
                                     // Reset
-                                    self.handler.vt(.modify_key_format, .legacy);
+                                    try self.handler.vt(.modify_key_format, .legacy);
                                     break :blk;
                                 }
 
@@ -1467,7 +1463,7 @@ pub fn Stream(comptime H: type) type {
                                     }
                                 }
 
-                                self.handler.vt(.modify_key_format, format);
+                                try self.handler.vt(.modify_key_format, format);
                             },
 
                             else => log.warn(
@@ -1514,7 +1510,7 @@ pub fn Stream(comptime H: type) type {
                             return;
                         };
 
-                        self.handler.vt(.device_status, .{ .request = req });
+                        try self.handler.vt(.device_status, .{ .request = req });
                         return;
                     }
 
@@ -1528,7 +1524,7 @@ pub fn Stream(comptime H: type) type {
                                 // control what exactly is being disabled. However, we
                                 // only support reverting back to modify other keys in
                                 // numeric except format.
-                                self.handler.vt(.modify_key_format, .other_keys_numeric_except);
+                                try self.handler.vt(.modify_key_format, .other_keys_numeric_except);
                             },
 
                             else => log.warn(
@@ -1570,9 +1566,9 @@ pub fn Stream(comptime H: type) type {
                         const mode_raw = input.params[0];
                         const mode = modes.modeFromInt(mode_raw, ansi_mode);
                         if (mode) |m| {
-                            self.handler.vt(.request_mode, .{ .mode = m });
+                            try self.handler.vt(.request_mode, .{ .mode = m });
                         } else {
-                            self.handler.vt(.request_mode_unknown, .{
+                            try self.handler.vt(.request_mode_unknown, .{
                                 .mode = mode_raw,
                                 .ansi = ansi_mode,
                             });
@@ -1610,7 +1606,7 @@ pub fn Stream(comptime H: type) type {
                                     return;
                                 },
                             };
-                            self.handler.vt(.cursor_style, style);
+                            try self.handler.vt(.cursor_style, style);
                         },
 
                         // DECSCA
@@ -1631,14 +1627,14 @@ pub fn Stream(comptime H: type) type {
                             };
 
                             switch (mode) {
-                                .off => self.handler.vt(.protected_mode_off, {}),
-                                .iso => self.handler.vt(.protected_mode_iso, {}),
-                                .dec => self.handler.vt(.protected_mode_dec, {}),
+                                .off => try self.handler.vt(.protected_mode_off, {}),
+                                .iso => try self.handler.vt(.protected_mode_iso, {}),
+                                .dec => try self.handler.vt(.protected_mode_dec, {}),
                             }
                         },
 
                         // XTVERSION
-                        '>' => self.handler.vt(.xtversion, {}),
+                        '>' => try self.handler.vt(.xtversion, {}),
                         else => {
                             log.warn(
                                 "ignoring unimplemented CSI q with intermediates: {s}",
@@ -1658,9 +1654,9 @@ pub fn Stream(comptime H: type) type {
                     switch (input.intermediates.len) {
                         // DECSTBM - Set Top and Bottom Margins
                         0 => switch (input.params.len) {
-                            0 => self.handler.vt(.top_and_bottom_margin, .{ .top_left = 0, .bottom_right = 0 }),
-                            1 => self.handler.vt(.top_and_bottom_margin, .{ .top_left = input.params[0], .bottom_right = 0 }),
-                            2 => self.handler.vt(.top_and_bottom_margin, .{ .top_left = input.params[0], .bottom_right = input.params[1] }),
+                            0 => try self.handler.vt(.top_and_bottom_margin, .{ .top_left = 0, .bottom_right = 0 }),
+                            1 => try self.handler.vt(.top_and_bottom_margin, .{ .top_left = input.params[0], .bottom_right = 0 }),
+                            2 => try self.handler.vt(.top_and_bottom_margin, .{ .top_left = input.params[0], .bottom_right = input.params[1] }),
                             else => {
                                 @branchHint(.unlikely);
                                 log.warn("invalid DECSTBM command: {f}", .{input});
@@ -1672,7 +1668,7 @@ pub fn Stream(comptime H: type) type {
                             '?' => {
                                 for (input.params) |mode_int| {
                                     if (modes.modeFromInt(mode_int, false)) |mode| {
-                                        self.handler.vt(.restore_mode, .{ .mode = mode });
+                                        try self.handler.vt(.restore_mode, .{ .mode = mode });
                                     } else {
                                         log.warn(
                                             "unimplemented restore mode: {}",
@@ -1702,9 +1698,9 @@ pub fn Stream(comptime H: type) type {
                         // to our handler to do the proper logic. If mode 69
                         // is set, then we should invoke DECSLRM, otherwise
                         // we should invoke SC.
-                        0 => self.handler.vt(.left_and_right_margin_ambiguous, {}),
-                        1 => self.handler.vt(.left_and_right_margin, .{ .top_left = input.params[0], .bottom_right = 0 }),
-                        2 => self.handler.vt(.left_and_right_margin, .{ .top_left = input.params[0], .bottom_right = input.params[1] }),
+                        0 => try self.handler.vt(.left_and_right_margin_ambiguous, {}),
+                        1 => try self.handler.vt(.left_and_right_margin, .{ .top_left = input.params[0], .bottom_right = 0 }),
+                        2 => try self.handler.vt(.left_and_right_margin, .{ .top_left = input.params[0], .bottom_right = input.params[1] }),
                         else => log.warn("invalid DECSLRM command: {f}", .{input}),
                     },
 
@@ -1712,7 +1708,7 @@ pub fn Stream(comptime H: type) type {
                         '?' => {
                             for (input.params) |mode_int| {
                                 if (modes.modeFromInt(mode_int, false)) |mode| {
-                                    self.handler.vt(.save_mode, .{ .mode = mode });
+                                    try self.handler.vt(.save_mode, .{ .mode = mode });
                                 } else {
                                     log.warn(
                                         "unimplemented save mode: {}",
@@ -1740,7 +1736,7 @@ pub fn Stream(comptime H: type) type {
                                 },
                             };
 
-                            self.handler.vt(.mouse_shift_capture, capture);
+                            try self.handler.vt(.mouse_shift_capture, capture);
                         },
 
                         else => log.warn(
@@ -1762,28 +1758,28 @@ pub fn Stream(comptime H: type) type {
                             switch (input.params[0]) {
                                 14 => if (input.params.len == 1) {
                                     // report the text area size in pixels
-                                    self.handler.vt(.size_report, .csi_14_t);
+                                    try self.handler.vt(.size_report, .csi_14_t);
                                 } else log.warn(
                                     "ignoring CSI 14 t with extra parameters: {f}",
                                     .{input},
                                 ),
                                 16 => if (input.params.len == 1) {
                                     // report cell size in pixels
-                                    self.handler.vt(.size_report, .csi_16_t);
+                                    try self.handler.vt(.size_report, .csi_16_t);
                                 } else log.warn(
                                     "ignoring CSI 16 t with extra parameters: {f}",
                                     .{input},
                                 ),
                                 18 => if (input.params.len == 1) {
                                     // report screen size in characters
-                                    self.handler.vt(.size_report, .csi_18_t);
+                                    try self.handler.vt(.size_report, .csi_18_t);
                                 } else log.warn(
                                     "ignoring CSI 18 t with extra parameters: {f}",
                                     .{input},
                                 ),
                                 21 => if (input.params.len == 1) {
                                     // report window title
-                                    self.handler.vt(.size_report, .csi_21_t);
+                                    try self.handler.vt(.size_report, .csi_21_t);
                                 } else log.warn(
                                     "ignoring CSI 21 t with extra parameters: {f}",
                                     .{input},
@@ -1800,8 +1796,8 @@ pub fn Stream(comptime H: type) type {
                                     else
                                         0;
                                     switch (number) {
-                                        22 => self.handler.vt(.title_push, index),
-                                        23 => self.handler.vt(.title_pop, index),
+                                        22 => try self.handler.vt(.title_push, index),
+                                        23 => try self.handler.vt(.title_pop, index),
                                         else => @compileError("unreachable"),
                                     }
                                 } else log.warn(
@@ -1825,11 +1821,11 @@ pub fn Stream(comptime H: type) type {
                 },
 
                 'u' => switch (input.intermediates.len) {
-                    0 => self.handler.vt(.restore_cursor, {}),
+                    0 => try self.handler.vt(.restore_cursor, {}),
 
                     // Kitty keyboard protocol
                     1 => switch (input.intermediates[0]) {
-                        '?' => self.handler.vt(.kitty_keyboard_query, {}),
+                        '?' => try self.handler.vt(.kitty_keyboard_query, {}),
 
                         '>' => push: {
                             const flags: u5 = if (input.params.len == 1)
@@ -1840,7 +1836,7 @@ pub fn Stream(comptime H: type) type {
                             else
                                 0;
 
-                            self.handler.vt(.kitty_keyboard_push, .{ .flags = @as(kitty.KeyFlags, @bitCast(flags)) });
+                            try self.handler.vt(.kitty_keyboard_push, .{ .flags = @as(kitty.KeyFlags, @bitCast(flags)) });
                         },
 
                         '<' => {
@@ -1849,7 +1845,7 @@ pub fn Stream(comptime H: type) type {
                             else
                                 1;
 
-                            self.handler.vt(.kitty_keyboard_pop, number);
+                            try self.handler.vt(.kitty_keyboard_pop, number);
                         },
 
                         '=' => set: {
@@ -1878,9 +1874,9 @@ pub fn Stream(comptime H: type) type {
 
                             const kitty_flags: streampkg.Action.KittyKeyboardFlags = .{ .flags = @as(kitty.KeyFlags, @bitCast(flags)) };
                             switch (action_tag) {
-                                .kitty_keyboard_set => self.handler.vt(.kitty_keyboard_set, kitty_flags),
-                                .kitty_keyboard_set_or => self.handler.vt(.kitty_keyboard_set_or, kitty_flags),
-                                .kitty_keyboard_set_not => self.handler.vt(.kitty_keyboard_set_not, kitty_flags),
+                                .kitty_keyboard_set => try self.handler.vt(.kitty_keyboard_set, kitty_flags),
+                                .kitty_keyboard_set_or => try self.handler.vt(.kitty_keyboard_set_or, kitty_flags),
+                                .kitty_keyboard_set_not => try self.handler.vt(.kitty_keyboard_set_not, kitty_flags),
                                 else => unreachable,
                             }
                         },
@@ -1899,7 +1895,7 @@ pub fn Stream(comptime H: type) type {
 
                 // ICH - Insert Blanks
                 '@' => switch (input.intermediates.len) {
-                    0 => self.handler.vt(.insert_blanks, switch (input.params.len) {
+                    0 => try self.handler.vt(.insert_blanks, switch (input.params.len) {
                         0 => 1,
                         1 => @max(1, input.params[0]),
                         else => {
@@ -1936,14 +1932,14 @@ pub fn Stream(comptime H: type) type {
                         },
                     };
 
-                    self.handler.vt(.active_status_display, display);
+                    try self.handler.vt(.active_status_display, display);
                 },
 
                 else => log.warn("unimplemented CSI action: {f}", .{input}),
             }
         }
 
-        inline fn oscDispatch(self: *Self, cmd: osc.Command) void {
+        inline fn oscDispatch(self: *Self, cmd: osc.Command) !void {
             // The branch hints here are based on real world data
             // which indicates that the most common OSC commands are:
             //
@@ -1969,7 +1965,7 @@ pub fn Stream(comptime H: type) type {
             switch (cmd) {
                 .semantic_prompt => |sp| {
                     @branchHint(.likely);
-                    self.handler.vt(.semantic_prompt, sp);
+                    try self.handler.vt(.semantic_prompt, sp);
                 },
 
                 .change_window_title => |title| {
@@ -1980,7 +1976,7 @@ pub fn Stream(comptime H: type) type {
                         return;
                     }
 
-                    self.handler.vt(.window_title, .{ .title = title });
+                    try self.handler.vt(.window_title, .{ .title = title });
                 },
 
                 .change_window_icon => |icon| {
@@ -1989,7 +1985,7 @@ pub fn Stream(comptime H: type) type {
                 },
 
                 .clipboard_contents => |clip| {
-                    self.handler.vt(.clipboard_contents, .{
+                    try self.handler.vt(.clipboard_contents, .{
                         .kind = clip.kind,
                         .data = clip.data,
                     });
@@ -1997,7 +1993,7 @@ pub fn Stream(comptime H: type) type {
 
                 .report_pwd => |v| {
                     @branchHint(.likely);
-                    self.handler.vt(.report_pwd, .{ .url = v.value });
+                    try self.handler.vt(.report_pwd, .{ .url = v.value });
                 },
 
                 .mouse_shape => |v| {
@@ -2007,12 +2003,12 @@ pub fn Stream(comptime H: type) type {
                         return;
                     };
 
-                    self.handler.vt(.mouse_shape, shape);
+                    try self.handler.vt(.mouse_shape, shape);
                 },
 
                 .color_operation => |v| {
                     @branchHint(.likely);
-                    self.handler.vt(.color_operation, .{
+                    try self.handler.vt(.color_operation, .{
                         .op = v.op,
                         .requests = v.requests,
                         .terminator = v.terminator,
@@ -2020,11 +2016,11 @@ pub fn Stream(comptime H: type) type {
                 },
 
                 .kitty_color_protocol => |v| {
-                    self.handler.vt(.kitty_color_report, v);
+                    try self.handler.vt(.kitty_color_report, v);
                 },
 
                 .show_desktop_notification => |v| {
-                    self.handler.vt(.show_desktop_notification, .{
+                    try self.handler.vt(.show_desktop_notification, .{
                         .title = v.title,
                         .body = v.body,
                     });
@@ -2032,7 +2028,7 @@ pub fn Stream(comptime H: type) type {
 
                 .hyperlink_start => |v| {
                     @branchHint(.likely);
-                    self.handler.vt(.start_hyperlink, .{
+                    try self.handler.vt(.start_hyperlink, .{
                         .uri = v.uri,
                         .id = v.id,
                     });
@@ -2040,11 +2036,11 @@ pub fn Stream(comptime H: type) type {
 
                 .hyperlink_end => {
                     @branchHint(.likely);
-                    self.handler.vt(.end_hyperlink, {});
+                    try self.handler.vt(.end_hyperlink, {});
                 },
 
                 .conemu_progress_report => |v| {
-                    self.handler.vt(.progress_report, v);
+                    try self.handler.vt(.progress_report, v);
                 },
 
                 .conemu_sleep,
@@ -2076,7 +2072,7 @@ pub fn Stream(comptime H: type) type {
             self: *Self,
             intermediates: []const u8,
             set: charsets.Charset,
-        ) void {
+        ) !void {
             if (intermediates.len != 1) {
                 log.warn("invalid charset intermediate: {any}", .{intermediates});
                 return;
@@ -2096,7 +2092,7 @@ pub fn Stream(comptime H: type) type {
                 },
             };
 
-            self.handler.vt(.configure_charset, .{
+            try self.handler.vt(.configure_charset, .{
                 .slot = slot,
                 .charset = set,
             });
@@ -2105,7 +2101,7 @@ pub fn Stream(comptime H: type) type {
         inline fn escDispatch(
             self: *Self,
             action: Parser.Action.ESC,
-        ) void {
+        ) !void {
             // The branch hints here are based on real world data
             // which indicates that the most common ESC finals are:
             //
@@ -2133,19 +2129,19 @@ pub fn Stream(comptime H: type) type {
                 // Charsets
                 'B' => {
                     @branchHint(.likely);
-                    self.configureCharset(action.intermediates, .ascii);
+                    try self.configureCharset(action.intermediates, .ascii);
                 },
-                'A' => self.configureCharset(action.intermediates, .british),
+                'A' => try self.configureCharset(action.intermediates, .british),
                 '0' => {
                     @branchHint(.likely);
-                    self.configureCharset(action.intermediates, .dec_special);
+                    try self.configureCharset(action.intermediates, .dec_special);
                 },
 
                 // DECSC - Save Cursor
                 '7' => {
                     @branchHint(.likely);
                     switch (action.intermediates.len) {
-                        0 => self.handler.vt(.save_cursor, {}),
+                        0 => try self.handler.vt(.save_cursor, {}),
                         else => {
                             @branchHint(.unlikely);
                             log.warn("invalid command: {f}", .{action});
@@ -2159,14 +2155,14 @@ pub fn Stream(comptime H: type) type {
                     switch (action.intermediates.len) {
                         // DECRC - Restore Cursor
                         0 => {
-                            self.handler.vt(.restore_cursor, {});
+                            try self.handler.vt(.restore_cursor, {});
                             break :blk {};
                         },
 
                         1 => switch (action.intermediates[0]) {
                             // DECALN - Fill Screen with E
                             '#' => {
-                                self.handler.vt(.decaln, {});
+                                try self.handler.vt(.decaln, {});
                                 break :blk {};
                             },
 
@@ -2181,7 +2177,7 @@ pub fn Stream(comptime H: type) type {
 
                 // IND - Index
                 'D' => switch (action.intermediates.len) {
-                    0 => self.handler.vt(.index, {}),
+                    0 => try self.handler.vt(.index, {}),
                     else => {
                         @branchHint(.unlikely);
                         log.warn("invalid index command: {f}", .{action});
@@ -2191,7 +2187,7 @@ pub fn Stream(comptime H: type) type {
 
                 // NEL - Next Line
                 'E' => switch (action.intermediates.len) {
-                    0 => self.handler.vt(.next_line, {}),
+                    0 => try self.handler.vt(.next_line, {}),
                     else => {
                         @branchHint(.unlikely);
                         log.warn("invalid next line command: {f}", .{action});
@@ -2201,7 +2197,7 @@ pub fn Stream(comptime H: type) type {
 
                 // HTS - Horizontal Tab Set
                 'H' => switch (action.intermediates.len) {
-                    0 => self.handler.vt(.tab_set, {}),
+                    0 => try self.handler.vt(.tab_set, {}),
                     else => {
                         @branchHint(.unlikely);
                         log.warn("invalid tab set command: {f}", .{action});
@@ -2213,7 +2209,7 @@ pub fn Stream(comptime H: type) type {
                 'M' => {
                     @branchHint(.likely);
                     switch (action.intermediates.len) {
-                        0 => self.handler.vt(.reverse_index, {}),
+                        0 => try self.handler.vt(.reverse_index, {}),
                         else => {
                             @branchHint(.unlikely);
                             log.warn("invalid reverse index command: {f}", .{action});
@@ -2224,7 +2220,7 @@ pub fn Stream(comptime H: type) type {
 
                 // SS2 - Single Shift 2
                 'N' => switch (action.intermediates.len) {
-                    0 => self.handler.vt(.invoke_charset, .{
+                    0 => try self.handler.vt(.invoke_charset, .{
                         .bank = .GL,
                         .charset = .G2,
                         .locking = true,
@@ -2238,7 +2234,7 @@ pub fn Stream(comptime H: type) type {
 
                 // SS3 - Single Shift 3
                 'O' => switch (action.intermediates.len) {
-                    0 => self.handler.vt(.invoke_charset, .{
+                    0 => try self.handler.vt(.invoke_charset, .{
                         .bank = .GL,
                         .charset = .G3,
                         .locking = true,
@@ -2252,24 +2248,24 @@ pub fn Stream(comptime H: type) type {
 
                 // SPA - Start of Guarded Area
                 'V' => switch (action.intermediates.len) {
-                    0 => self.handler.vt(.protected_mode_iso, {}),
+                    0 => try self.handler.vt(.protected_mode_iso, {}),
                     else => log.warn("unimplemented ESC callback: {f}", .{action}),
                 },
 
                 // EPA - End of Guarded Area
                 'W' => switch (action.intermediates.len) {
-                    0 => self.handler.vt(.protected_mode_off, {}),
+                    0 => try self.handler.vt(.protected_mode_off, {}),
                     else => log.warn("unimplemented ESC callback: {f}", .{action}),
                 },
 
                 // DECID
                 'Z' => if (action.intermediates.len == 0) {
-                    self.handler.vt(.device_attributes, .primary);
+                    try self.handler.vt(.device_attributes, .primary);
                 } else log.warn("unimplemented ESC callback: {f}", .{action}),
 
                 // RIS - Full Reset
                 'c' => switch (action.intermediates.len) {
-                    0 => self.handler.vt(.full_reset, {}),
+                    0 => try self.handler.vt(.full_reset, {}),
                     else => {
                         log.warn("invalid full reset command: {f}", .{action});
                         return;
@@ -2278,7 +2274,7 @@ pub fn Stream(comptime H: type) type {
 
                 // LS2 - Locking Shift 2
                 'n' => switch (action.intermediates.len) {
-                    0 => self.handler.vt(.invoke_charset, .{
+                    0 => try self.handler.vt(.invoke_charset, .{
                         .bank = .GL,
                         .charset = .G2,
                         .locking = false,
@@ -2292,7 +2288,7 @@ pub fn Stream(comptime H: type) type {
 
                 // LS3 - Locking Shift 3
                 'o' => switch (action.intermediates.len) {
-                    0 => self.handler.vt(.invoke_charset, .{
+                    0 => try self.handler.vt(.invoke_charset, .{
                         .bank = .GL,
                         .charset = .G3,
                         .locking = false,
@@ -2306,7 +2302,7 @@ pub fn Stream(comptime H: type) type {
 
                 // LS1R - Locking Shift 1 Right
                 '~' => switch (action.intermediates.len) {
-                    0 => self.handler.vt(.invoke_charset, .{
+                    0 => try self.handler.vt(.invoke_charset, .{
                         .bank = .GR,
                         .charset = .G1,
                         .locking = false,
@@ -2320,7 +2316,7 @@ pub fn Stream(comptime H: type) type {
 
                 // LS2R - Locking Shift 2 Right
                 '}' => switch (action.intermediates.len) {
-                    0 => self.handler.vt(.invoke_charset, .{
+                    0 => try self.handler.vt(.invoke_charset, .{
                         .bank = .GR,
                         .charset = .G2,
                         .locking = false,
@@ -2334,7 +2330,7 @@ pub fn Stream(comptime H: type) type {
 
                 // LS3R - Locking Shift 3 Right
                 '|' => switch (action.intermediates.len) {
-                    0 => self.handler.vt(.invoke_charset, .{
+                    0 => try self.handler.vt(.invoke_charset, .{
                         .bank = .GR,
                         .charset = .G3,
                         .locking = false,
@@ -2350,7 +2346,7 @@ pub fn Stream(comptime H: type) type {
                 '=' => {
                     @branchHint(.likely);
                     switch (action.intermediates.len) {
-                        0 => self.handler.vt(.set_mode, .{ .mode = .keypad_keys }),
+                        0 => try self.handler.vt(.set_mode, .{ .mode = .keypad_keys }),
                         else => log.warn("unimplemented setMode: {f}", .{action}),
                     }
                 },
@@ -2359,7 +2355,7 @@ pub fn Stream(comptime H: type) type {
                 '>' => {
                     @branchHint(.likely);
                     switch (action.intermediates.len) {
-                        0 => self.handler.vt(.reset_mode, .{ .mode = .keypad_keys }),
+                        0 => try self.handler.vt(.reset_mode, .{ .mode = .keypad_keys }),
                         else => log.warn("unimplemented setMode: {f}", .{action}),
                     }
                 },
@@ -2390,7 +2386,7 @@ test "stream: print" {
             self: *@This(),
             comptime action: Action.Tag,
             value: Action.Value(action),
-        ) void {
+        ) !void {
             switch (action) {
                 .print => self.c = value.cp,
                 else => {},
@@ -2399,7 +2395,7 @@ test "stream: print" {
     };
 
     var s: Stream(H) = .init(.{});
-    s.next('x');
+    try s.next('x');
     try testing.expectEqual(@as(u21, 'x'), s.handler.c.?);
 }
 
@@ -2411,7 +2407,7 @@ test "simd: print invalid utf-8" {
             self: *@This(),
             comptime action: Action.Tag,
             value: Action.Value(action),
-        ) void {
+        ) !void {
             switch (action) {
                 .print => self.c = value.cp,
                 else => {},
@@ -2420,7 +2416,7 @@ test "simd: print invalid utf-8" {
     };
 
     var s: Stream(H) = .init(.{});
-    s.nextSlice(&.{0xFF});
+    try s.nextSlice(&.{0xFF});
     try testing.expectEqual(@as(u21, 0xFFFD), s.handler.c.?);
 }
 
@@ -2432,7 +2428,7 @@ test "simd: complete incomplete utf-8" {
             self: *@This(),
             comptime action: Action.Tag,
             value: Action.Value(action),
-        ) void {
+        ) !void {
             switch (action) {
                 .print => self.c = value.cp,
                 else => {},
@@ -2441,11 +2437,11 @@ test "simd: complete incomplete utf-8" {
     };
 
     var s: Stream(H) = .init(.{});
-    s.nextSlice(&.{0xE0}); // 3 byte
+    try s.nextSlice(&.{0xE0}); // 3 byte
     try testing.expect(s.handler.c == null);
-    s.nextSlice(&.{0xA0}); // still incomplete
+    try s.nextSlice(&.{0xA0}); // still incomplete
     try testing.expect(s.handler.c == null);
-    s.nextSlice(&.{0x80});
+    try s.nextSlice(&.{0x80});
     try testing.expectEqual(@as(u21, 0x800), s.handler.c.?);
 }
 
@@ -2457,7 +2453,7 @@ test "stream: cursor right (CUF)" {
             self: *@This(),
             comptime action: Action.Tag,
             value: Action.Value(action),
-        ) void {
+        ) !void {
             switch (action) {
                 .cursor_right => self.amount = value.value,
                 else => {},
@@ -2466,18 +2462,18 @@ test "stream: cursor right (CUF)" {
     };
 
     var s: Stream(H) = .init(.{});
-    s.nextSlice("\x1B[C");
+    try s.nextSlice("\x1B[C");
     try testing.expectEqual(@as(u16, 1), s.handler.amount);
 
-    s.nextSlice("\x1B[5C");
+    try s.nextSlice("\x1B[5C");
     try testing.expectEqual(@as(u16, 5), s.handler.amount);
 
     s.handler.amount = 0;
-    s.nextSlice("\x1B[5;4C");
+    try s.nextSlice("\x1B[5;4C");
     try testing.expectEqual(@as(u16, 0), s.handler.amount);
 
     s.handler.amount = 0;
-    s.nextSlice("\x1b[?3C");
+    try s.nextSlice("\x1b[?3C");
     try testing.expectEqual(@as(u16, 0), s.handler.amount);
 }
 
@@ -2489,7 +2485,7 @@ test "stream: dec set mode (SM) and reset mode (RM)" {
             self: *@This(),
             comptime action: Action.Tag,
             value: Action.Value(action),
-        ) void {
+        ) !void {
             switch (action) {
                 .set_mode => self.mode = value.mode,
                 .reset_mode => self.mode = @as(modes.Mode, @enumFromInt(1)),
@@ -2499,14 +2495,14 @@ test "stream: dec set mode (SM) and reset mode (RM)" {
     };
 
     var s: Stream(H) = .init(.{});
-    s.nextSlice("\x1B[?6h");
+    try s.nextSlice("\x1B[?6h");
     try testing.expectEqual(@as(modes.Mode, .origin), s.handler.mode);
 
-    s.nextSlice("\x1B[?6l");
+    try s.nextSlice("\x1B[?6l");
     try testing.expectEqual(@as(modes.Mode, @enumFromInt(1)), s.handler.mode);
 
     s.handler.mode = @as(modes.Mode, @enumFromInt(1));
-    s.nextSlice("\x1B[6 h");
+    try s.nextSlice("\x1B[6 h");
     try testing.expectEqual(@as(modes.Mode, @enumFromInt(1)), s.handler.mode);
 }
 
@@ -2518,7 +2514,7 @@ test "stream: ansi set mode (SM) and reset mode (RM)" {
             self: *@This(),
             comptime action: Action.Tag,
             value: Action.Value(action),
-        ) void {
+        ) !void {
             switch (action) {
                 .set_mode => self.mode = value.mode,
                 .reset_mode => self.mode = null,
@@ -2528,14 +2524,14 @@ test "stream: ansi set mode (SM) and reset mode (RM)" {
     };
 
     var s: Stream(H) = .init(.{});
-    s.nextSlice("\x1B[4h");
+    try s.nextSlice("\x1B[4h");
     try testing.expectEqual(@as(modes.Mode, .insert), s.handler.mode.?);
 
-    s.nextSlice("\x1B[4l");
+    try s.nextSlice("\x1B[4l");
     try testing.expect(s.handler.mode == null);
 
     s.handler.mode = null;
-    s.nextSlice("\x1B[>5h");
+    try s.nextSlice("\x1B[>5h");
     try testing.expect(s.handler.mode == null);
 }
 
@@ -2552,17 +2548,17 @@ test "stream: ansi set mode (SM) and reset mode (RM) with unknown value" {
             self: *@This(),
             comptime action: Action.Tag,
             value: Action.Value(action),
-        ) void {
+        ) !void {
             _ = self;
             _ = value;
         }
     };
 
     var s: Stream(H) = .init(.{});
-    s.nextSlice("\x1B[6h");
+    try s.nextSlice("\x1B[6h");
     try testing.expect(s.handler.mode == null);
 
-    s.nextSlice("\x1B[6l");
+    try s.nextSlice("\x1B[6l");
     try testing.expect(s.handler.mode == null);
 }
 
@@ -2575,7 +2571,7 @@ test "stream: restore mode" {
             self: *Self,
             comptime action: Stream(Self).Action.Tag,
             value: Stream(Self).Action.Value(action),
-        ) void {
+        ) !void {
             _ = value;
             switch (action) {
                 .top_and_bottom_margin => self.called = true,
@@ -2585,7 +2581,7 @@ test "stream: restore mode" {
     };
 
     var s: Stream(H) = .init(.{});
-    for ("\x1B[?42r") |c| s.next(c);
+    for ("\x1B[?42r") |c| try s.next(c);
     try testing.expect(!s.handler.called);
 }
 
@@ -2598,7 +2594,7 @@ test "stream: pop kitty keyboard with no params defaults to 1" {
             self: *Self,
             comptime action: streampkg.Action.Tag,
             value: streampkg.Action.Value(action),
-        ) void {
+        ) !void {
             switch (action) {
                 .kitty_keyboard_pop => self.n = value,
                 else => {},
@@ -2607,7 +2603,7 @@ test "stream: pop kitty keyboard with no params defaults to 1" {
     };
 
     var s: Stream(H) = .init(.{});
-    for ("\x1B[<u") |c| s.next(c);
+    for ("\x1B[<u") |c| try s.next(c);
     try testing.expectEqual(@as(u16, 1), s.handler.n);
 }
 
@@ -2620,7 +2616,7 @@ test "stream: DECSCA" {
             self: *Self,
             comptime action: Stream(Self).Action.Tag,
             value: Stream(Self).Action.Value(action),
-        ) void {
+        ) !void {
             _ = value;
             switch (action) {
                 .protected_mode_off => self.v = .off,
@@ -2633,19 +2629,19 @@ test "stream: DECSCA" {
 
     var s: Stream(H) = .init(.{});
     {
-        for ("\x1B[\"q") |c| s.next(c);
+        for ("\x1B[\"q") |c| try s.next(c);
         try testing.expectEqual(ansi.ProtectedMode.off, s.handler.v.?);
     }
     {
-        for ("\x1B[0\"q") |c| s.next(c);
+        for ("\x1B[0\"q") |c| try s.next(c);
         try testing.expectEqual(ansi.ProtectedMode.off, s.handler.v.?);
     }
     {
-        for ("\x1B[2\"q") |c| s.next(c);
+        for ("\x1B[2\"q") |c| try s.next(c);
         try testing.expectEqual(ansi.ProtectedMode.off, s.handler.v.?);
     }
     {
-        for ("\x1B[1\"q") |c| s.next(c);
+        for ("\x1B[1\"q") |c| try s.next(c);
         try testing.expectEqual(ansi.ProtectedMode.dec, s.handler.v.?);
     }
 }
@@ -2660,7 +2656,7 @@ test "stream: DECED, DECSED" {
             self: *Self,
             comptime action: anytype,
             value: anytype,
-        ) void {
+        ) !void {
             switch (action) {
                 .erase_display_below => {
                     self.mode = .below;
@@ -2689,59 +2685,59 @@ test "stream: DECED, DECSED" {
 
     var s: Stream(H) = .init(.{});
     {
-        for ("\x1B[?J") |c| s.next(c);
+        for ("\x1B[?J") |c| try s.next(c);
         try testing.expectEqual(csi.EraseDisplay.below, s.handler.mode.?);
         try testing.expect(s.handler.protected.?);
     }
     {
-        for ("\x1B[?0J") |c| s.next(c);
+        for ("\x1B[?0J") |c| try s.next(c);
         try testing.expectEqual(csi.EraseDisplay.below, s.handler.mode.?);
         try testing.expect(s.handler.protected.?);
     }
     {
-        for ("\x1B[?1J") |c| s.next(c);
+        for ("\x1B[?1J") |c| try s.next(c);
         try testing.expectEqual(csi.EraseDisplay.above, s.handler.mode.?);
         try testing.expect(s.handler.protected.?);
     }
     {
-        for ("\x1B[?2J") |c| s.next(c);
+        for ("\x1B[?2J") |c| try s.next(c);
         try testing.expectEqual(csi.EraseDisplay.complete, s.handler.mode.?);
         try testing.expect(s.handler.protected.?);
     }
     {
-        for ("\x1B[?3J") |c| s.next(c);
+        for ("\x1B[?3J") |c| try s.next(c);
         try testing.expectEqual(csi.EraseDisplay.scrollback, s.handler.mode.?);
         try testing.expect(s.handler.protected.?);
     }
 
     {
-        for ("\x1B[J") |c| s.next(c);
+        for ("\x1B[J") |c| try s.next(c);
         try testing.expectEqual(csi.EraseDisplay.below, s.handler.mode.?);
         try testing.expect(!s.handler.protected.?);
     }
     {
-        for ("\x1B[0J") |c| s.next(c);
+        for ("\x1B[0J") |c| try s.next(c);
         try testing.expectEqual(csi.EraseDisplay.below, s.handler.mode.?);
         try testing.expect(!s.handler.protected.?);
     }
     {
-        for ("\x1B[1J") |c| s.next(c);
+        for ("\x1B[1J") |c| try s.next(c);
         try testing.expectEqual(csi.EraseDisplay.above, s.handler.mode.?);
         try testing.expect(!s.handler.protected.?);
     }
     {
-        for ("\x1B[2J") |c| s.next(c);
+        for ("\x1B[2J") |c| try s.next(c);
         try testing.expectEqual(csi.EraseDisplay.complete, s.handler.mode.?);
         try testing.expect(!s.handler.protected.?);
     }
     {
-        for ("\x1B[3J") |c| s.next(c);
+        for ("\x1B[3J") |c| try s.next(c);
         try testing.expectEqual(csi.EraseDisplay.scrollback, s.handler.mode.?);
         try testing.expect(!s.handler.protected.?);
     }
     {
         // Invalid and ignored by the handler
-        for ("\x1B[>0J") |c| s.next(c);
+        for ("\x1B[>0J") |c| try s.next(c);
         try testing.expectEqual(csi.EraseDisplay.scrollback, s.handler.mode.?);
         try testing.expect(!s.handler.protected.?);
     }
@@ -2757,7 +2753,7 @@ test "stream: DECEL, DECSEL" {
             self: *Self,
             comptime action: anytype,
             value: anytype,
-        ) void {
+        ) !void {
             switch (action) {
                 .erase_line_right => {
                     self.mode = .right;
@@ -2782,49 +2778,49 @@ test "stream: DECEL, DECSEL" {
 
     var s: Stream(H) = .init(.{});
     {
-        for ("\x1B[?K") |c| s.next(c);
+        for ("\x1B[?K") |c| try s.next(c);
         try testing.expectEqual(csi.EraseLine.right, s.handler.mode.?);
         try testing.expect(s.handler.protected.?);
     }
     {
-        for ("\x1B[?0K") |c| s.next(c);
+        for ("\x1B[?0K") |c| try s.next(c);
         try testing.expectEqual(csi.EraseLine.right, s.handler.mode.?);
         try testing.expect(s.handler.protected.?);
     }
     {
-        for ("\x1B[?1K") |c| s.next(c);
+        for ("\x1B[?1K") |c| try s.next(c);
         try testing.expectEqual(csi.EraseLine.left, s.handler.mode.?);
         try testing.expect(s.handler.protected.?);
     }
     {
-        for ("\x1B[?2K") |c| s.next(c);
+        for ("\x1B[?2K") |c| try s.next(c);
         try testing.expectEqual(csi.EraseLine.complete, s.handler.mode.?);
         try testing.expect(s.handler.protected.?);
     }
 
     {
-        for ("\x1B[K") |c| s.next(c);
+        for ("\x1B[K") |c| try s.next(c);
         try testing.expectEqual(csi.EraseLine.right, s.handler.mode.?);
         try testing.expect(!s.handler.protected.?);
     }
     {
-        for ("\x1B[0K") |c| s.next(c);
+        for ("\x1B[0K") |c| try s.next(c);
         try testing.expectEqual(csi.EraseLine.right, s.handler.mode.?);
         try testing.expect(!s.handler.protected.?);
     }
     {
-        for ("\x1B[1K") |c| s.next(c);
+        for ("\x1B[1K") |c| try s.next(c);
         try testing.expectEqual(csi.EraseLine.left, s.handler.mode.?);
         try testing.expect(!s.handler.protected.?);
     }
     {
-        for ("\x1B[2K") |c| s.next(c);
+        for ("\x1B[2K") |c| try s.next(c);
         try testing.expectEqual(csi.EraseLine.complete, s.handler.mode.?);
         try testing.expect(!s.handler.protected.?);
     }
     {
         // Invalid and ignored by the handler
-        for ("\x1B[<1K") |c| s.next(c);
+        for ("\x1B[<1K") |c| try s.next(c);
         try testing.expectEqual(csi.EraseLine.complete, s.handler.mode.?);
         try testing.expect(!s.handler.protected.?);
     }
@@ -2838,7 +2834,7 @@ test "stream: DECSCUSR" {
             self: *@This(),
             comptime action: Stream(@This()).Action.Tag,
             value: Stream(@This()).Action.Value(action),
-        ) void {
+        ) !void {
             switch (action) {
                 .cursor_style => self.style = value,
                 else => {},
@@ -2847,14 +2843,14 @@ test "stream: DECSCUSR" {
     };
 
     var s: Stream(H) = .init(.{});
-    s.nextSlice("\x1B[ q");
+    try s.nextSlice("\x1B[ q");
     try testing.expect(s.handler.style.? == .default);
 
-    s.nextSlice("\x1B[1 q");
+    try s.nextSlice("\x1B[1 q");
     try testing.expect(s.handler.style.? == .blinking_block);
 
     // Invalid and ignored by the handler
-    s.nextSlice("\x1B[?0 q");
+    try s.nextSlice("\x1B[?0 q");
     try testing.expect(s.handler.style.? == .blinking_block);
 }
 
@@ -2866,7 +2862,7 @@ test "stream: DECSCUSR without space" {
             self: *@This(),
             comptime action: Stream(@This()).Action.Tag,
             value: Stream(@This()).Action.Value(action),
-        ) void {
+        ) !void {
             switch (action) {
                 .cursor_style => self.style = value,
                 else => {},
@@ -2875,10 +2871,10 @@ test "stream: DECSCUSR without space" {
     };
 
     var s: Stream(H) = .init(.{});
-    s.nextSlice("\x1B[q");
+    try s.nextSlice("\x1B[q");
     try testing.expect(s.handler.style == null);
 
-    s.nextSlice("\x1B[1q");
+    try s.nextSlice("\x1B[1q");
     try testing.expect(s.handler.style == null);
 }
 
@@ -2890,7 +2886,7 @@ test "stream: XTSHIFTESCAPE" {
             self: *@This(),
             comptime action: streampkg.Action.Tag,
             value: streampkg.Action.Value(action),
-        ) void {
+        ) !void {
             switch (action) {
                 .mouse_shift_capture => self.escape = value,
                 else => {},
@@ -2899,20 +2895,20 @@ test "stream: XTSHIFTESCAPE" {
     };
 
     var s: Stream(H) = .init(.{});
-    s.nextSlice("\x1B[>2s");
+    try s.nextSlice("\x1B[>2s");
     try testing.expect(s.handler.escape == null);
 
-    s.nextSlice("\x1B[>s");
+    try s.nextSlice("\x1B[>s");
     try testing.expect(s.handler.escape.? == false);
 
-    s.nextSlice("\x1B[>0s");
+    try s.nextSlice("\x1B[>0s");
     try testing.expect(s.handler.escape.? == false);
 
-    s.nextSlice("\x1B[>1s");
+    try s.nextSlice("\x1B[>1s");
     try testing.expect(s.handler.escape.? == true);
 
     // Invalid and ignored by the handler
-    s.nextSlice("\x1B[1 s");
+    try s.nextSlice("\x1B[1 s");
     try testing.expect(s.handler.escape.? == true);
 }
 
@@ -2924,7 +2920,7 @@ test "stream: change window title with invalid utf-8" {
             self: *@This(),
             comptime action: anytype,
             value: anytype,
-        ) void {
+        ) !void {
             _ = value;
             switch (action) {
                 .window_title => self.seen = true,
@@ -2935,13 +2931,13 @@ test "stream: change window title with invalid utf-8" {
 
     {
         var s: Stream(H) = .init(.{});
-        s.nextSlice("\x1b]2;abc\x1b\\");
+        try s.nextSlice("\x1b]2;abc\x1b\\");
         try testing.expect(s.handler.seen);
     }
 
     {
         var s: Stream(H) = .init(.{});
-        s.nextSlice("\x1b]2;abc\xc0\x1b\\");
+        try s.nextSlice("\x1b]2;abc\xc0\x1b\\");
         try testing.expect(!s.handler.seen);
     }
 }
@@ -2955,7 +2951,7 @@ test "stream: insert characters" {
             self: *Self,
             comptime action: anytype,
             value: anytype,
-        ) void {
+        ) !void {
             _ = value;
             switch (action) {
                 .insert_blanks => self.called = true,
@@ -2965,11 +2961,11 @@ test "stream: insert characters" {
     };
 
     var s: Stream(H) = .init(.{});
-    for ("\x1B[42@") |c| s.next(c);
+    for ("\x1B[42@") |c| try s.next(c);
     try testing.expect(s.handler.called);
 
     s.handler.called = false;
-    for ("\x1B[?42@") |c| s.next(c);
+    for ("\x1B[?42@") |c| try s.next(c);
     try testing.expect(!s.handler.called);
 }
 
@@ -2982,7 +2978,7 @@ test "stream: insert characters explicit zero clamps to 1" {
             self: *Self,
             comptime action: anytype,
             value: anytype,
-        ) void {
+        ) !void {
             switch (action) {
                 .insert_blanks => self.value = value,
                 else => {},
@@ -2991,7 +2987,7 @@ test "stream: insert characters explicit zero clamps to 1" {
     };
 
     var s: Stream(H) = .init(.{});
-    for ("\x1B[0@") |c| s.next(c);
+    for ("\x1B[0@") |c| try s.next(c);
     try testing.expectEqual(@as(usize, 1), s.handler.value.?);
 }
 
@@ -3004,7 +3000,7 @@ test "stream: SCOSC" {
             self: *Self,
             comptime action: Stream(Self).Action.Tag,
             value: Stream(Self).Action.Value(action),
-        ) void {
+        ) !void {
             _ = value;
             switch (action) {
                 .left_and_right_margin => @panic("bad"),
@@ -3015,7 +3011,7 @@ test "stream: SCOSC" {
     };
 
     var s: Stream(H) = .init(.{});
-    for ("\x1B[s") |c| s.next(c);
+    for ("\x1B[s") |c| try s.next(c);
     try testing.expect(s.handler.called);
 }
 
@@ -3028,7 +3024,7 @@ test "stream: SCORC" {
             self: *Self,
             comptime action: streampkg.Action.Tag,
             value: streampkg.Action.Value(action),
-        ) void {
+        ) !void {
             _ = value;
             switch (action) {
                 .restore_cursor => self.called = true,
@@ -3038,7 +3034,7 @@ test "stream: SCORC" {
     };
 
     var s: Stream(H) = .init(.{});
-    for ("\x1B[u") |c| s.next(c);
+    for ("\x1B[u") |c| try s.next(c);
     try testing.expect(s.handler.called);
 }
 
@@ -3048,7 +3044,7 @@ test "stream: too many csi params" {
             self: *@This(),
             comptime action: anytype,
             value: anytype,
-        ) void {
+        ) !void {
             _ = self;
             _ = value;
             switch (action) {
@@ -3059,7 +3055,7 @@ test "stream: too many csi params" {
     };
 
     var s: Stream(H) = .init(.{});
-    s.nextSlice("\x1B[1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1C");
+    try s.nextSlice("\x1B[1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1C");
 }
 
 test "stream: csi param too long" {
@@ -3068,7 +3064,7 @@ test "stream: csi param too long" {
             self: *@This(),
             comptime action: anytype,
             value: anytype,
-        ) void {
+        ) !void {
             _ = self;
             _ = action;
             _ = value;
@@ -3076,7 +3072,7 @@ test "stream: csi param too long" {
     };
 
     var s: Stream(H) = .init(.{});
-    s.nextSlice("\x1B[1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111C");
+    try s.nextSlice("\x1B[1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111C");
 }
 
 test "stream: send report with CSI t" {
@@ -3087,7 +3083,7 @@ test "stream: send report with CSI t" {
             self: *@This(),
             comptime action: streampkg.Action.Tag,
             value: streampkg.Action.Value(action),
-        ) void {
+        ) !void {
             switch (action) {
                 .size_report => self.style = value,
                 else => {},
@@ -3097,16 +3093,16 @@ test "stream: send report with CSI t" {
 
     var s: Stream(H) = .init(.{});
 
-    s.nextSlice("\x1b[14t");
+    try s.nextSlice("\x1b[14t");
     try testing.expectEqual(csi.SizeReportStyle.csi_14_t, s.handler.style);
 
-    s.nextSlice("\x1b[16t");
+    try s.nextSlice("\x1b[16t");
     try testing.expectEqual(csi.SizeReportStyle.csi_16_t, s.handler.style);
 
-    s.nextSlice("\x1b[18t");
+    try s.nextSlice("\x1b[18t");
     try testing.expectEqual(csi.SizeReportStyle.csi_18_t, s.handler.style);
 
-    s.nextSlice("\x1b[21t");
+    try s.nextSlice("\x1b[21t");
     try testing.expectEqual(csi.SizeReportStyle.csi_21_t, s.handler.style);
 }
 
@@ -3122,7 +3118,7 @@ test "stream: invalid CSI t" {
             self: *@This(),
             comptime action: anytype,
             value: anytype,
-        ) void {
+        ) !void {
             _ = self;
             _ = action;
             _ = value;
@@ -3131,7 +3127,7 @@ test "stream: invalid CSI t" {
 
     var s: Stream(H) = .init(.{});
 
-    s.nextSlice("\x1b[19t");
+    try s.nextSlice("\x1b[19t");
     try testing.expectEqual(null, s.handler.style);
 }
 
@@ -3143,7 +3139,7 @@ test "stream: CSI t push title" {
             self: *@This(),
             comptime action: streampkg.Action.Tag,
             value: streampkg.Action.Value(action),
-        ) void {
+        ) !void {
             switch (action) {
                 .title_push => self.index = value,
                 else => {},
@@ -3153,7 +3149,7 @@ test "stream: CSI t push title" {
 
     var s: Stream(H) = .init(.{});
 
-    s.nextSlice("\x1b[22;0t");
+    try s.nextSlice("\x1b[22;0t");
     try testing.expectEqual(@as(u16, 0), s.handler.index.?);
 }
 
@@ -3165,7 +3161,7 @@ test "stream: CSI t push title with explicit window" {
             self: *@This(),
             comptime action: streampkg.Action.Tag,
             value: streampkg.Action.Value(action),
-        ) void {
+        ) !void {
             switch (action) {
                 .title_push => self.index = value,
                 else => {},
@@ -3175,7 +3171,7 @@ test "stream: CSI t push title with explicit window" {
 
     var s: Stream(H) = .init(.{});
 
-    s.nextSlice("\x1b[22;2t");
+    try s.nextSlice("\x1b[22;2t");
     try testing.expectEqual(@as(u16, 0), s.handler.index.?);
 }
 
@@ -3187,7 +3183,7 @@ test "stream: CSI t push title with explicit icon" {
             self: *@This(),
             comptime action: streampkg.Action.Tag,
             value: streampkg.Action.Value(action),
-        ) void {
+        ) !void {
             switch (action) {
                 .title_push => self.index = value,
                 else => {},
@@ -3197,7 +3193,7 @@ test "stream: CSI t push title with explicit icon" {
 
     var s: Stream(H) = .init(.{});
 
-    s.nextSlice("\x1b[22;1t");
+    try s.nextSlice("\x1b[22;1t");
     try testing.expectEqual(null, s.handler.index);
 }
 
@@ -3209,7 +3205,7 @@ test "stream: CSI t push title with index" {
             self: *@This(),
             comptime action: streampkg.Action.Tag,
             value: streampkg.Action.Value(action),
-        ) void {
+        ) !void {
             switch (action) {
                 .title_push => self.index = value,
                 else => {},
@@ -3219,7 +3215,7 @@ test "stream: CSI t push title with index" {
 
     var s: Stream(H) = .init(.{});
 
-    s.nextSlice("\x1b[22;0;5t");
+    try s.nextSlice("\x1b[22;0;5t");
     try testing.expectEqual(@as(u16, 5), s.handler.index.?);
 }
 
@@ -3231,7 +3227,7 @@ test "stream: CSI t pop title" {
             self: *@This(),
             comptime action: streampkg.Action.Tag,
             value: streampkg.Action.Value(action),
-        ) void {
+        ) !void {
             switch (action) {
                 .title_pop => self.index = value,
                 else => {},
@@ -3241,7 +3237,7 @@ test "stream: CSI t pop title" {
 
     var s: Stream(H) = .init(.{});
 
-    s.nextSlice("\x1b[23;0t");
+    try s.nextSlice("\x1b[23;0t");
     try testing.expectEqual(@as(u16, 0), s.handler.index.?);
 }
 
@@ -3253,7 +3249,7 @@ test "stream: CSI t pop title with explicit window" {
             self: *@This(),
             comptime action: streampkg.Action.Tag,
             value: streampkg.Action.Value(action),
-        ) void {
+        ) !void {
             switch (action) {
                 .title_pop => self.index = value,
                 else => {},
@@ -3263,7 +3259,7 @@ test "stream: CSI t pop title with explicit window" {
 
     var s: Stream(H) = .init(.{});
 
-    s.nextSlice("\x1b[23;2t");
+    try s.nextSlice("\x1b[23;2t");
     try testing.expectEqual(@as(u16, 0), s.handler.index.?);
 }
 
@@ -3275,7 +3271,7 @@ test "stream: CSI t pop title with explicit icon" {
             self: *@This(),
             comptime action: streampkg.Action.Tag,
             value: streampkg.Action.Value(action),
-        ) void {
+        ) !void {
             switch (action) {
                 .title_pop => self.index = value,
                 else => {},
@@ -3285,7 +3281,7 @@ test "stream: CSI t pop title with explicit icon" {
 
     var s: Stream(H) = .init(.{});
 
-    s.nextSlice("\x1b[23;1t");
+    try s.nextSlice("\x1b[23;1t");
     try testing.expectEqual(null, s.handler.index);
 }
 
@@ -3297,7 +3293,7 @@ test "stream: CSI t pop title with index" {
             self: *@This(),
             comptime action: streampkg.Action.Tag,
             value: streampkg.Action.Value(action),
-        ) void {
+        ) !void {
             switch (action) {
                 .title_pop => self.index = value,
                 else => {},
@@ -3307,7 +3303,7 @@ test "stream: CSI t pop title with index" {
 
     var s: Stream(H) = .init(.{});
 
-    s.nextSlice("\x1b[23;0;5t");
+    try s.nextSlice("\x1b[23;0;5t");
     try testing.expectEqual(@as(u16, 5), s.handler.index.?);
 }
 
@@ -3319,7 +3315,7 @@ test "stream CSI W clear tab stops" {
             self: *@This(),
             comptime action: anytype,
             value: anytype,
-        ) void {
+        ) !void {
             _ = value;
             self.action = action;
         }
@@ -3327,10 +3323,10 @@ test "stream CSI W clear tab stops" {
 
     var s: Stream(H) = .init(.{});
 
-    s.nextSlice("\x1b[2W");
+    try s.nextSlice("\x1b[2W");
     try testing.expectEqual(Action.Key.tab_clear_current, s.handler.action.?);
 
-    s.nextSlice("\x1b[5W");
+    try s.nextSlice("\x1b[5W");
     try testing.expectEqual(Action.Key.tab_clear_all, s.handler.action.?);
 }
 
@@ -3342,7 +3338,7 @@ test "stream CSI W tab set" {
             self: *@This(),
             comptime action: anytype,
             value: anytype,
-        ) void {
+        ) !void {
             _ = value;
             self.action = action;
         }
@@ -3350,19 +3346,19 @@ test "stream CSI W tab set" {
 
     var s: Stream(H) = .init(.{});
 
-    s.nextSlice("\x1b[W");
+    try s.nextSlice("\x1b[W");
     try testing.expectEqual(Action.Key.tab_set, s.handler.action.?);
 
     s.handler.action = null;
-    s.nextSlice("\x1b[0W");
+    try s.nextSlice("\x1b[0W");
     try testing.expectEqual(Action.Key.tab_set, s.handler.action.?);
 
     s.handler.action = null;
-    s.nextSlice("\x1b[>W");
+    try s.nextSlice("\x1b[>W");
     try testing.expect(s.handler.action == null);
 
     s.handler.action = null;
-    s.nextSlice("\x1b[99W");
+    try s.nextSlice("\x1b[99W");
     try testing.expect(s.handler.action == null);
 }
 
@@ -3374,7 +3370,7 @@ test "stream CSI ? W reset tab stops" {
             self: *@This(),
             comptime action: anytype,
             value: anytype,
-        ) void {
+        ) !void {
             _ = value;
             self.action = action;
         }
@@ -3382,15 +3378,15 @@ test "stream CSI ? W reset tab stops" {
 
     var s: Stream(H) = .init(.{});
 
-    s.nextSlice("\x1b[?2W");
+    try s.nextSlice("\x1b[?2W");
     try testing.expect(s.handler.action == null);
 
-    s.nextSlice("\x1b[?5W");
+    try s.nextSlice("\x1b[?5W");
     try testing.expectEqual(Action.Key.tab_reset, s.handler.action.?);
 
     // Invalid and ignored by the handler
     s.handler.action = null;
-    s.nextSlice("\x1b[?1;2;3W");
+    try s.nextSlice("\x1b[?1;2;3W");
     try testing.expect(s.handler.action == null);
 }
 
@@ -3403,7 +3399,7 @@ test "stream: SGR with 17+ parameters for underline color" {
             self: *@This(),
             comptime action: anytype,
             value: anytype,
-        ) void {
+        ) !void {
             switch (action) {
                 .set_attribute => {
                     self.attrs = value;
@@ -3418,7 +3414,7 @@ test "stream: SGR with 17+ parameters for underline color" {
 
     // Kakoune-style SGR with underline color as 17th parameter
     // This tests the fix where param 17 was being dropped
-    s.nextSlice("\x1b[4:3;38;2;51;51;51;48;2;170;170;170;58;2;255;97;136;0m");
+    try s.nextSlice("\x1b[4:3;38;2;51;51;51;48;2;170;170;170;58;2;255;97;136;0m");
     try testing.expect(s.handler.called);
 }
 
@@ -3433,7 +3429,7 @@ test "stream: tab clear with overflowing param" {
             self: *@This(),
             comptime action: Action.Tag,
             value: Action.Value(action),
-        ) void {
+        ) !void {
             _ = value;
             switch (action) {
                 .tab_clear_current, .tab_clear_all => self.called = true,
@@ -3445,5 +3441,5 @@ test "stream: tab clear with overflowing param" {
     var s: Stream(H) = .init(.{});
     // This is the exact input from the fuzz crash (minus the mode byte):
     // CSI with a huge numeric param that saturates to 65535, followed by 'g'.
-    s.nextSlice("\x1b[388888888888888888888888888888888888g\x1b[0m");
+    try s.nextSlice("\x1b[388888888888888888888888888888888888g\x1b[0m");
 }

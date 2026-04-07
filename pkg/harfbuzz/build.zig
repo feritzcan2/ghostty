@@ -103,14 +103,7 @@ fn buildLib(b: *std.Build, module: *std.Build.Module, options: anytype) !*std.Bu
         .linkage = .static,
     });
     lib.linkLibC();
-    // On MSVC, we must not use linkLibCpp because Zig unconditionally
-    // passes -nostdinc++ and then adds its bundled libc++/libc++abi
-    // include paths, which conflict with MSVC's own C++ runtime headers.
-    // The MSVC SDK include directories (added via linkLibC) contain
-    // both C and C++ headers, so linkLibCpp is not needed.
-    if (target.result.abi != .msvc) {
-        lib.linkLibCpp();
-    }
+    lib.linkLibCpp();
 
     if (target.result.os.tag.isDarwin()) {
         try apple_sdk.addPaths(b, lib);

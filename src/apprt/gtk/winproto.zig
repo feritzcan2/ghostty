@@ -46,9 +46,9 @@ pub const App = union(Protocol) {
         return .{ .none = .{} };
     }
 
-    pub fn deinit(self: *App) void {
+    pub fn deinit(self: *App, alloc: Allocator) void {
         switch (self.*) {
-            inline else => |*v| v.deinit(),
+            inline else => |*v| v.deinit(alloc),
         }
     }
 
@@ -117,9 +117,9 @@ pub const Window = union(Protocol) {
         };
     }
 
-    pub fn deinit(self: *Window) void {
+    pub fn deinit(self: *Window, alloc: Allocator) void {
         switch (self.*) {
-            inline else => |*v| v.deinit(),
+            inline else => |*v| v.deinit(alloc),
         }
     }
 
