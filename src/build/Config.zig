@@ -244,8 +244,11 @@ pub fn init(b: *std.Build, appVersion: []const u8) !Config {
             else => return err,
         };
         if (vsn.tag) |tag| {
-            // Tip releases behave just like any other pre-release so we skip.
-            if (!std.mem.eql(u8, tag, "tip")) {
+            // Tip releases and xcframework tags behave just like any other
+            // pre-release so we skip.
+            if (!std.mem.eql(u8, tag, "tip") and
+                !std.mem.startsWith(u8, tag, "xcframework-"))
+            {
                 const expected = b.fmt("v{d}.{d}.{d}", .{
                     app_version.major,
                     app_version.minor,
