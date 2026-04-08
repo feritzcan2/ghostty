@@ -8,10 +8,12 @@
         // Zig libs
 
         .libxev = .{
-            // mitchellh/libxev
-            .url = "https://deps.files.ghostty.org/libxev-34fa50878aec6e5fa8f532867001ab3c36fae23e.tar.gz",
-            .hash = "libxev-0.0.0-86vtc4IcEwCqEYxEYoN_3KXmc6A9VLcm22aVImfvecYs",
-            .lazy = true,
+            // mitchellh/libxev -- vendored locally with iOS EVFILT_MACHPORT fix:
+            // kqueue.zig used `os.tag != .macos` instead of `!os.tag.isDarwin()`,
+            // which excluded iOS from Mach port kqueue events, causing
+            // ghostty_surface_free to deadlock (pthread_join waits forever
+            // because the xev stop notification never reaches the event loop).
+            .path = "pkg/libxev",
         },
         .vaxis = .{
             // rockorager/libvaxis
