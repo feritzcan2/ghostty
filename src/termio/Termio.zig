@@ -80,7 +80,7 @@ thread_enter_state: ?*ThreadEnterState = null,
 /// allocation-free in the steady state. It receives the same bytes that the
 /// parser is about to consume — multi-byte UTF-8 sequences may split across
 /// invocations.
-pty_tap: ?*const fn (?*anyopaque, [*]const u8, usize) callconv(.C) void = null,
+pty_tap: ?*const fn (?*anyopaque, [*]const u8, usize) callconv(.c) void = null,
 pty_tap_userdata: ?*anyopaque = null,
 
 /// The state we need to keep around only until we enter the IO

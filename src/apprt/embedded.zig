@@ -1836,7 +1836,7 @@ pub const CAPI = struct {
     /// to remote (mobile) mirror clients. Pass `fn_ptr = null` to clear.
     export fn ghostty_surface_set_pty_tap(
         surface: *Surface,
-        fn_ptr: ?*const fn (?*anyopaque, [*]const u8, usize) callconv(.C) void,
+        fn_ptr: ?*const fn (?*anyopaque, [*]const u8, usize) callconv(.c) void,
         ud: ?*anyopaque,
     ) void {
         surface.core_surface.io.pty_tap = fn_ptr;
